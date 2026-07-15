@@ -1,7 +1,7 @@
 import Foundation
 
 /// An event that can be recorded on the Tokiwatari debug timeline.
-public protocol TokiwatariTrackable {
+public protocol TokiwatariEvent {
     /// Logical identifier (e.g. `tea_tapped_42`). Recorded as `identifier`.
     var logIdentifier: String { get }
 

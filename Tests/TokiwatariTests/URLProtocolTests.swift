@@ -286,7 +286,7 @@ final class MockURLProtocol: URLProtocol, @unchecked Sendable {
     }
 
     @Test func uiEventAndAPIEventShareTheSession() async throws {
-        struct TapEvent: TokiwatariTrackable {
+        struct TapEvent: TokiwatariEvent {
             let logIdentifier = "tea_tapped_42"
             let parameters: [String: Any] = ["tea_id": 42]
         }

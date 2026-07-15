@@ -41,22 +41,26 @@ Logging is compiled in only when this package is built with DEBUG; otherwise eve
 
 ## Recording UI events
 
-Conform your analytics event types to `TokiwatariTrackable` and log them from your analytics wrapper, next to the real analytics call:
+Conform your analytics event types to `TokiwatariEvent` and log them from your analytics wrapper, next to the real analytics call:
 
 ```swift
-struct TeaTappedEvent: TokiwatariTrackable {
+import Tokiwatari
+
+struct TeaTappedEvent: TokiwatariEvent {
     let teaId: Int
     var logIdentifier: String { "tea_tapped_\(teaId)" }
     var parameters: [String: Any] { ["tea_id": teaId] }
 }
 
-func track(_ event: any TokiwatariTrackable) {
+func track(_ event: any TokiwatariEvent) {
     // ... your real analytics send goes here ...
     Tokiwatari.log(event)   // no-op in Release
 }
 ```
 
 `logIdentifier` is the search key (`tokiwatari ui --like 'tea_tapped_%'`); it is also a good fit for the view's `accessibilityIdentifier`.
+
+Modules that only define events can depend on the dependency-free `TokiwatariTracking` product alone (`import TokiwatariTracking`) instead of the full SDK.
 
 ## Recording API traffic
 
