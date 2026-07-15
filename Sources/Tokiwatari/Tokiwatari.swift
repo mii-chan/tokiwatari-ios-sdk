@@ -69,7 +69,7 @@ public enum Tokiwatari {
 
     /// Records a UI event on the debug timeline
     /// (`event_kind = 'ui'`, `identifier = logIdentifier`, `payload_json = parameters`).
-    public static func log(_ event: any TokiwatariTrackable) {
+    public static func log(_ event: any TokiwatariEvent) {
         #if DEBUG
         let payloadJson = jsonString(fromJSONObject: event.parameters)
         guard let slot = nextEventSlot() else { return }
