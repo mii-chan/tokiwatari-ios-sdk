@@ -286,11 +286,6 @@ final class MockURLProtocol: URLProtocol, @unchecked Sendable {
     }
 
     @Test func uiEventAndAPIEventShareTheSession() async throws {
-        struct TapEvent: TokiwatariEvent {
-            let logIdentifier = "tea_tapped_42"
-            let parameters: [String: Any] = ["tea_id": 42]
-        }
-
         let (database, session) = try configureAndMakeSession()
         MockURLProtocol.handler = { request in
             let response = HTTPURLResponse(
@@ -299,7 +294,7 @@ final class MockURLProtocol: URLProtocol, @unchecked Sendable {
             return (response, Data())
         }
 
-        Tokiwatari.log(TapEvent())
+        Tokiwatari.log(identifier: "tea_tapped_42", parameters: ["tea_id": 42])
         _ = try await session.data(for: URLRequest(url: URL(string: "https://api.example.com/v1/teas")!))
         try database.flushPendingWrites()
 
