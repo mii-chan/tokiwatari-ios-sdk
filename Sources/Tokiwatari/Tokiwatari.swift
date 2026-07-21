@@ -68,8 +68,8 @@ public enum Tokiwatari {
     }
 
     /// Records a UI event on the debug timeline
-    /// (`event_kind = 'ui'`, `identifier = logIdentifier`, `payload_json = parameters`).
-    public static func log(_ event: any TokiwatariEvent) {
+    /// (`event_kind = 'ui'`, `payload_json = parameters`).
+    public static func log(_ event: TokiwatariEvent) {
         #if DEBUG
         let payloadJson = jsonString(fromJSONObject: event.parameters)
         guard let slot = nextEventSlot() else { return }
@@ -78,7 +78,7 @@ public enum Tokiwatari {
             sessionSequence: slot.sequence,
             timestamp: Date(),
             eventKind: "ui",
-            identifier: event.logIdentifier,
+            identifier: event.identifier,
             httpMethod: nil,
             url: nil,
             statusCode: nil,
@@ -87,6 +87,11 @@ public enum Tokiwatari {
         )
         slot.database.insertAsync(record)
         #endif
+    }
+
+    /// Convenience overload of `log(_:)` for one-off events.
+    public static func log(identifier: String, parameters: [String: Any] = [:]) {
+        log(TokiwatariEvent(identifier: identifier, parameters: parameters))
     }
 
     /// Exports a consistent single-file snapshot of the debug database

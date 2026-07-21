@@ -1,10 +1,15 @@
 import Foundation
 
 /// An event that can be recorded on the Tokiwatari debug timeline.
-public protocol TokiwatariEvent {
+public struct TokiwatariEvent {
     /// Logical identifier (e.g. `tea_tapped_42`). Recorded as `identifier`.
-    var logIdentifier: String { get }
+    public let identifier: String
 
     /// Event parameters. Persisted as JSON in `payload_json`.
-    var parameters: [String: Any] { get }
+    public let parameters: [String: Any]
+
+    public init(identifier: String, parameters: [String: Any] = [:]) {
+        self.identifier = identifier
+        self.parameters = parameters
+    }
 }
