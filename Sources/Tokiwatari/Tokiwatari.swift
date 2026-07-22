@@ -42,8 +42,9 @@ public enum Tokiwatari {
     ///   - additionalSensitiveBodyKeys: JSON body keys recorded as `<redacted>`,
     ///     in addition to the built-in set; matching ignores case and `_`/`-`
     ///     and recurses into nested values. Built-ins cannot be opted out of.
-    ///     Built-in redaction is defense in depth, not a guarantee — add your
-    ///     app-specific keys here.
+    ///     Built-in redaction is defense in depth, not a guarantee — always add
+    ///     your app-specific keys (e.g. `loginCode`, `magicLink`,
+    ///     `verificationCode`) here.
     public static func configure(
         session: any TokiwatariSessionProviding = TokiwatariLogSession(),
         allowedQueryParameters: [String] = [],
@@ -533,6 +534,12 @@ public enum Tokiwatari {
         "set-cookie",
         "x-api-key",
         "x-auth-token",
+        "x-csrf-token",
+        "x-xsrf-token",
+        "x-access-token",
+        "x-refresh-token",
+        "x-session-token",
+        "x-client-secret",
     ]
     // Stored pre-normalized (lowercased, "_"/"-" stripped); see normalizedBodyKey.
     private static let defaultSensitiveBodyKeys: Set<String> = [
@@ -546,6 +553,28 @@ public enum Tokiwatari {
         "apikey",
         "clientsecret",
         "authorization",
+        "otp",
+        "onetimepassword",
+        "pin",
+        "pincode",
+        "mfacode",
+        "totp",
+        "sessionid",
+        "sessionkey",
+        "sessiontoken",
+        "csrf",
+        "csrftoken",
+        "xsrftoken",
+        "privatekey",
+        "credential",
+        "credentials",
+        "auth",
+        "bearertoken",
+        "cardnumber",
+        "pan",
+        "securitycode",
+        "cvv",
+        "cvc",
     ]
 
     /// Key normalization for body redaction: lowercased with `_`/`-` stripped,
