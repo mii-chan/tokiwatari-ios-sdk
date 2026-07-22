@@ -176,16 +176,11 @@ public enum Tokiwatari {
         var sensitiveHeaderNames: Set<String> = Tokiwatari.defaultSensitiveHeaderNames
         var sensitiveBodyKeys: Set<String> = Tokiwatari.defaultSensitiveBodyKeys
         var allowedQueryParameters: Set<String> = []
-        var maximumMainDatabaseSizeBytes: Int = 128 * 1024 * 1024
-        var maximumRetainedWALSizeBytes: Int = 16 * 1024 * 1024
         var maximumPayloadBytes: Int = SanitizationLimits.maximumPayloadBytes
         // Watermark for the sequence-monotonicity assertion in nextEventSlot().
         var lastSessionId: String?
         var lastSequence: Int64 = 0
     }
-
-    static let minimumMainDatabaseSizeBytes = 1024 * 1024
-    static let minimumRetainedWALSizeBytes = 256 * 1024
 
     struct SanitizationContext {
         var sensitiveHeaderNames: Set<String>
@@ -256,7 +251,11 @@ public enum Tokiwatari {
             }
             TokiwatariDatabase.cleanUpExpiredExports()
             let url = try databaseURL ?? TokiwatariDatabase.defaultDatabaseURL()
-            let db = try TokiwatariDatabase(url: url)
+            let db = try TokiwatariDatabase(
+                url: url,
+                maximumMainDatabaseSizeBytes: maximumMainDatabaseSizeBytes,
+                maximumRetainedWALSizeBytes: maximumRetainedWALSizeBytes
+            )
             try db.purge(keepingSessions: max(1, retentionSessions))
             database = db
         } catch {
@@ -269,8 +268,6 @@ public enum Tokiwatari {
             s.sensitiveHeaderNames = defaultSensitiveHeaderNames.union(headerNames)
             s.sensitiveBodyKeys = defaultSensitiveBodyKeys.union(bodyKeys)
             s.allowedQueryParameters = queryParameters
-            s.maximumMainDatabaseSizeBytes = max(minimumMainDatabaseSizeBytes, maximumMainDatabaseSizeBytes)
-            s.maximumRetainedWALSizeBytes = max(minimumRetainedWALSizeBytes, maximumRetainedWALSizeBytes)
             s.maximumPayloadBytes = maximumPayloadBytesForTesting ?? SanitizationLimits.maximumPayloadBytes
             s.lastSessionId = nil
             s.lastSequence = 0

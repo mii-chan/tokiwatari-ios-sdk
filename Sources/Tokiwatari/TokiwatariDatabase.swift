@@ -8,8 +8,18 @@ final class TokiwatariDatabase: Sendable {
     static let schemaVersion = 1
 
     let pool: DatabasePool
+    let maximumRetainedWALSizeBytes: Int
+    /// Actual limits reported back by SQLite — an existing database larger
+    /// than the requested cap raises `max_page_count` to its current size.
+    let effectiveMaxPageCount: Int64
+    let effectiveJournalSizeLimit: Int64
 
     static let databaseFileName = "tokiwatari_debug_events.sqlite"
+    static let minimumMainDatabaseSizeBytes = 1024 * 1024
+    static let minimumRetainedWALSizeBytes = 256 * 1024
+    /// Transient page allowance for opening a full database; withdrawn at the
+    /// end of `init` so reopening cannot ratchet the cap up.
+    static let openingPageHeadroom: Int64 = 16
 
     static func defaultDatabaseURL() throws -> URL {
         try supportDirectoryURL()
@@ -124,12 +134,39 @@ final class TokiwatariDatabase: Sendable {
         }
     }
 
-    init(url: URL) throws {
+    init(
+        url: URL,
+        maximumMainDatabaseSizeBytes: Int = 128 * 1024 * 1024,
+        maximumRetainedWALSizeBytes: Int = 16 * 1024 * 1024
+    ) throws {
+        assert(
+            maximumMainDatabaseSizeBytes > 0 && maximumRetainedWALSizeBytes > 0,
+            "Tokiwatari: database size limits must be positive"
+        )
+        // Clamp BEFORE any PRAGMA runs; a non-positive journal_size_limit
+        // would mean "unlimited".
+        let databaseLimit = Int64(max(Self.minimumMainDatabaseSizeBytes, maximumMainDatabaseSizeBytes))
+        let walLimit = Int64(max(Self.minimumRetainedWALSizeBytes, maximumRetainedWALSizeBytes))
+        self.maximumRetainedWALSizeBytes = Int(walLimit)
+
         try Self.prepareDirectory(url.deletingLastPathComponent())
 
         var configuration = Configuration()
         configuration.prepareDatabase { db in
             try db.execute(sql: "PRAGMA synchronous = NORMAL")
+            // DatabasePool runs this for readers too; size pragmas are writer-only.
+            guard !db.configuration.readonly else { return }
+            let pageSize = try Int64.fetchOne(db, sql: "PRAGMA page_size") ?? 4096
+            let currentPageCount = try Int64.fetchOne(db, sql: "PRAGMA page_count") ?? 0
+            let requestedPageCount = max(1, databaseLimit / pageSize)
+            // Transient opening headroom: pool bootstrap must be able to
+            // allocate a page even on a full database (GRDB's WAL-creating
+            // `grdb_issue_102` probe). The steady-state cap is re-applied
+            // WITHOUT headroom at the end of `init`.
+            let appliedPageCount = max(requestedPageCount, currentPageCount + Self.openingPageHeadroom)
+            // No placeholders for these pragmas — interpolate validated integers only.
+            _ = try Int64.fetchOne(db, sql: "PRAGMA max_page_count = \(appliedPageCount)")
+            _ = try Int64.fetchOne(db, sql: "PRAGMA journal_size_limit = \(walLimit)")
         }
         // DatabasePool activates WAL journal mode automatically.
         var pool = try DatabasePool(path: url.path, configuration: configuration)
@@ -174,6 +211,23 @@ final class TokiwatariDatabase: Sendable {
             try db.execute(sql: "CREATE INDEX IF NOT EXISTS idx_events_time ON events(session_id, timestamp)")
             try db.execute(sql: "PRAGMA user_version = \(Self.schemaVersion)")
         }
+
+        // Withdraw the opening headroom and verify the effective values on
+        // the writer: the steady-state cap is the requested size, or the
+        // database's current size if that is already larger — never more.
+        // SQLite itself never lets max_page_count drop below the current page
+        // count, so an over-cap database keeps its pages and simply cannot
+        // grow. The writer connection is permanent, so the value sticks.
+        let effective = try pool.write { db in
+            let pageSize = try Int64.fetchOne(db, sql: "PRAGMA page_size") ?? 4096
+            let currentPageCount = try Int64.fetchOne(db, sql: "PRAGMA page_count") ?? 0
+            let steadyPageCount = max(max(1, databaseLimit / pageSize), currentPageCount)
+            _ = try Int64.fetchOne(db, sql: "PRAGMA max_page_count = \(steadyPageCount)")
+            return (pageCount: try Int64.fetchOne(db, sql: "PRAGMA max_page_count") ?? 0,
+                    journalLimit: try Int64.fetchOne(db, sql: "PRAGMA journal_size_limit") ?? 0)
+        }
+        self.effectiveMaxPageCount = effective.pageCount
+        self.effectiveJournalSizeLimit = effective.journalLimit
 
         // Apply and verify the real file attributes after open; failure
         // propagates and leaves the SDK inactive rather than logging into
