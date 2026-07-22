@@ -30,9 +30,52 @@ enum EventPayloadEncoder {
         }
     }
 
-    static func encodedPayload(_ components: Components) -> String? {
+    /// Encodes the payload, degrading in stages when the encoded UTF-8 size
+    /// exceeds `maximumPayloadBytes`: response body → request body →
+    /// response headers → request headers → minimal event. The independent
+    /// columns (method/url/status) live outside the payload and survive even
+    /// full degradation.
+    static func encodedPayload(
+        _ components: Components,
+        maximumPayloadBytes: Int = SanitizationLimits.maximumPayloadBytes
+    ) -> String? {
         guard !components.isEmpty, let data = encode(components.payloadObject) else { return nil }
-        return String(decoding: data, as: UTF8.self)
+        guard data.count > maximumPayloadBytes else {
+            return String(decoding: data, as: UTF8.self)
+        }
+        let originalBytes = data.count
+        let droppedBody: [String: Any] = ["body_unavailable": "event_too_large"]
+
+        var degraded = components
+        let stages: [(inout Components) -> Bool] = [
+            { c in
+                guard c.responseBody != nil else { return false }
+                c.responseBody = droppedBody
+                return true
+            },
+            { c in
+                guard c.requestBody != nil else { return false }
+                c.requestBody = droppedBody
+                return true
+            },
+            { c in
+                guard c.responseHeaders != nil else { return false }
+                c.responseHeaders = nil
+                return true
+            },
+            { c in
+                guard c.requestHeaders != nil else { return false }
+                c.requestHeaders = nil
+                return true
+            },
+        ]
+        for stage in stages {
+            guard stage(&degraded) else { continue }
+            if let data = encode(degraded.payloadObject), data.count <= maximumPayloadBytes {
+                return String(decoding: data, as: UTF8.self)
+            }
+        }
+        return #"{"payload_dropped":"event_too_large","original_bytes":\#(originalBytes)}"#
     }
 
     static func encode(_ object: [String: Any]) -> Data? {

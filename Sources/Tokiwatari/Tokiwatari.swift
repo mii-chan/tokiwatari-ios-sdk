@@ -478,7 +478,8 @@ public enum Tokiwatari {
                 responseHeaders: responseHeaders,
                 responseBody: responseBodyResult.payloadValue,
                 error: error.map(sanitizedErrorInfo)
-            )
+            ),
+            maximumPayloadBytes: context.maximumPayloadBytes
         )
 
         return EventRecord(
@@ -565,6 +566,9 @@ public enum Tokiwatari {
             let sanitized = try sanitizer.sanitized(parameters)
             guard let data = try? JSONSerialization.data(withJSONObject: sanitized, options: [.sortedKeys]) else {
                 return dropped
+            }
+            guard data.count <= SanitizationLimits.maximumUIPayloadBytes else {
+                return #"{"payload_dropped":"payload_too_large","original_bytes":\#(data.count)}"#
             }
             return String(decoding: data, as: UTF8.self)
         } catch {
