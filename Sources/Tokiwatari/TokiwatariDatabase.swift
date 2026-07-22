@@ -222,20 +222,52 @@ final class TokiwatariDatabase: Sendable {
         }
     }
 
+    static let exportTimeToLive: TimeInterval = 24 * 60 * 60
+
+    static func exportDirectoryURL() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("TokiwatariExports", isDirectory: true)
+    }
+
+    /// Best-effort deletion of exports older than `exportTimeToLive`; runs at
+    /// configure time and before every export.
+    static func cleanUpExpiredExports(now: Date = Date()) {
+        let fileManager = FileManager.default
+        guard let contents = try? fileManager.contentsOfDirectory(
+            at: exportDirectoryURL(),
+            includingPropertiesForKeys: [.contentModificationDateKey]
+        ) else { return }
+        for file in contents {
+            guard let modified = (try? file.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate,
+                now.timeIntervalSince(modified) >= exportTimeToLive
+            else { continue }
+            try? fileManager.removeItem(at: file)
+        }
+    }
+
     /// Consistent single-file snapshot via `VACUUM INTO` (no `-wal`/`-shm`
-    /// sidecars), written to the temporary directory.
-    func exportSnapshot(now: Date = Date()) throws -> URL {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyyMMdd-HHmmss"
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("tokiwatari-export", isDirectory: true)
+    /// sidecars). The directory is protected and backup-excluded BEFORE the
+    /// file is generated, so the export inherits protection while still being
+    /// written; attributes are re-applied to the finished file.
+    func exportSnapshot() throws -> URL {
+        Self.cleanUpExpiredExports()
+        let directory = Self.exportDirectoryURL()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let url = directory.appendingPathComponent("tokiwatari_debug_events-\(formatter.string(from: now)).sqlite")
-        try? FileManager.default.removeItem(at: url)
+        try Self.applyFileProtection(to: directory)
+        try Self.excludeFromBackup(directory)
+        let url = directory.appendingPathComponent("tokiwatari-\(UUID().uuidString).sqlite")
         try pool.writeWithoutTransaction { db in
             // VACUUM INTO cannot run inside a transaction.
             try db.execute(sql: "VACUUM INTO ?", arguments: [url.path])
+        }
+        do {
+            try Self.applyFileProtection(to: url)
+            try Self.excludeFromBackup(url)
+        } catch {
+            // Never hand out an export whose attributes could not be verified.
+            try? FileManager.default.removeItem(at: url)
+            throw error
         }
         return url
     }

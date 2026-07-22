@@ -254,6 +254,7 @@ public enum Tokiwatari {
             if databaseURL == nil {
                 try TokiwatariDatabase.removeLegacyDatabase()
             }
+            TokiwatariDatabase.cleanUpExpiredExports()
             let url = try databaseURL ?? TokiwatariDatabase.defaultDatabaseURL()
             let db = try TokiwatariDatabase(url: url)
             try db.purge(keepingSessions: max(1, retentionSessions))

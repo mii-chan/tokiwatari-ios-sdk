@@ -82,6 +82,40 @@ import Testing
         }
     }
 
+    @Test func exportsUseUUIDNamesInTheProtectedExportDirectory() throws {
+        let database = try makeTemporaryDatabase()
+        let url = try database.exportSnapshot()
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        #expect(url.deletingLastPathComponent().lastPathComponent == "TokiwatariExports")
+        #expect(url.lastPathComponent.hasPrefix("tokiwatari-"))
+        #expect(url.pathExtension == "sqlite")
+        let directoryValues = try url.deletingLastPathComponent()
+            .resourceValues(forKeys: [.isExcludedFromBackupKey])
+        #expect(directoryValues.isExcludedFromBackup == true)
+        let fileValues = try url.resourceValues(forKeys: [.isExcludedFromBackupKey])
+        #expect(fileValues.isExcludedFromBackup == true)
+    }
+
+    @Test func expiredExportsAreCleanedUpAfterTheTTL() throws {
+        let directory = TokiwatariDatabase.exportDirectoryURL()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let expired = directory.appendingPathComponent("tokiwatari-\(UUID().uuidString).sqlite")
+        let fresh = directory.appendingPathComponent("tokiwatari-\(UUID().uuidString).sqlite")
+        FileManager.default.createFile(atPath: expired.path, contents: Data("x".utf8))
+        FileManager.default.createFile(atPath: fresh.path, contents: Data("x".utf8))
+        defer { try? FileManager.default.removeItem(at: fresh) }
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(-TokiwatariDatabase.exportTimeToLive - 3600)],
+            ofItemAtPath: expired.path
+        )
+
+        TokiwatariDatabase.cleanUpExpiredExports()
+
+        #expect(!FileManager.default.fileExists(atPath: expired.path))
+        #expect(FileManager.default.fileExists(atPath: fresh.path))
+    }
+
     #if os(iOS) && !targetEnvironment(simulator)
     @Test func databaseFilesUseCompleteUntilFirstUserAuthentication() throws {
         let url = makeTemporaryDatabaseURL()
