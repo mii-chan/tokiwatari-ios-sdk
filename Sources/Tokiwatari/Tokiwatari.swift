@@ -412,7 +412,35 @@ public enum Tokiwatari {
         end: Date,
         context: SanitizationContext
     ) -> EventRecord {
-        EventRecord(
+        let requestHeaders = request.allHTTPHeaderFields.flatMap { headers -> [String: String]? in
+            headers.isEmpty
+                ? nil
+                : HeaderSanitizer.sanitized(headers, sensitiveNames: context.sensitiveHeaderNames)
+        }
+
+        var responseHeaders: [String: String]?
+        if let response {
+            var headers: [String: String] = [:]
+            for (name, value) in response.allHeaderFields {
+                guard let name = name as? String else { continue }
+                headers[name] = "\(value)"
+            }
+            if !headers.isEmpty {
+                responseHeaders = HeaderSanitizer.sanitized(headers, sensitiveNames: context.sensitiveHeaderNames)
+            }
+        }
+
+        let payloadJson = EventPayloadEncoder.encodedPayload(
+            EventPayloadEncoder.Components(
+                requestHeaders: requestHeaders,
+                requestBody: nil,
+                responseHeaders: responseHeaders,
+                responseBody: nil,
+                error: error.map(sanitizedErrorInfo)
+            )
+        )
+
+        return EventRecord(
             sessionId: "",
             sessionSequence: 0,
             timestamp: end,
@@ -423,11 +451,30 @@ public enum Tokiwatari {
             httpMethod: request.httpMethod.map {
                 StringSanitizer.sanitized($0, maximumBytes: SanitizationLimits.httpMethodByteLimit)
             },
-            url: nil,
+            url: URLSanitizer.sanitizedString(
+                request.url,
+                allowedQueryParameters: context.allowedQueryParameters
+            ),
             statusCode: response?.statusCode,
             durationMs: clampedDurationMilliseconds(start: start, end: end),
-            payloadJson: nil
+            payloadJson: payloadJson
         )
+    }
+
+    /// Errors are stored as `{"domain": ..., "code": ...}` only; a URL-shaped
+    /// domain is replaced so no URL string can leak through it.
+    static func sanitizedErrorInfo(_ error: any Error) -> [String: Any] {
+        let nsError = error as NSError
+        let domain: String
+        if nsError.domain.contains("://") || nsError.domain.lowercased().hasPrefix("www.") {
+            domain = SanitizationMarkers.customErrorDomain
+        } else {
+            domain = StringSanitizer.sanitized(
+                nsError.domain,
+                maximumBytes: SanitizationLimits.errorDomainByteLimit
+            )
+        }
+        return ["domain": domain, "code": nsError.code]
     }
 
     static func clampedDurationMilliseconds(start: Date, end: Date) -> Int {
@@ -460,21 +507,6 @@ public enum Tokiwatari {
         "clientsecret",
         "authorization",
     ]
-
-    /// `sensitiveNames` must contain lowercased names.
-    static func redactedHeaders(
-        _ headers: [String: String],
-        sensitiveNames: Set<String>
-    ) -> [String: String] {
-        var result: [String: String] = [:]
-        result.reserveCapacity(headers.count)
-        for (name, value) in headers {
-            result[name] = sensitiveNames.contains(name.lowercased())
-                ? redactedValue
-                : value
-        }
-        return result
-    }
 
     /// Key normalization for body redaction: lowercased with `_`/`-` stripped,
     /// so `access_token`, `accessToken` and `ACCESS-TOKEN` all match.
