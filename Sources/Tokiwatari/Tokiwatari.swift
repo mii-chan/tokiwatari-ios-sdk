@@ -112,8 +112,11 @@ public enum Tokiwatari {
     /// Records one API call on the debug timeline (`event_kind = 'api'`).
     ///
     /// Inputs are sanitized synchronously on the calling thread; only an
-    /// immutable snapshot is handed to the writer queue. `identifier` is NOT
-    /// subject to redaction — never put secrets in it.
+    /// immutable snapshot is handed to the writer queue. The top-level string
+    /// `query` of a JSON request body — single object or each element of a
+    /// batch array — is always stored as `"<omitted>"`, GraphQL or not: query
+    /// documents can carry secrets that key redaction cannot catch.
+    /// `identifier` is NOT subject to redaction — never put secrets in it.
     public static func logAPIEvent(
         identifier: String? = nil,
         request: URLRequest,
@@ -181,6 +184,10 @@ public enum Tokiwatari {
         var sensitiveBodyKeys: Set<String>
         var allowedQueryParameters: Set<String>
         var maximumPayloadBytes: Int
+
+        var sanitizer: JSONSanitizer {
+            JSONSanitizer(sensitiveKeys: sensitiveBodyKeys, allowedQueryParameters: allowedQueryParameters)
+        }
     }
 
     private static func sanitizationContext() -> SanitizationContext? {
@@ -412,10 +419,27 @@ public enum Tokiwatari {
         end: Date,
         context: SanitizationContext
     ) -> EventRecord {
+        let sanitizer = context.sanitizer
+
         let requestHeaders = request.allHTTPHeaderFields.flatMap { headers -> [String: String]? in
             headers.isEmpty
                 ? nil
                 : HeaderSanitizer.sanitized(headers, sensitiveNames: context.sensitiveHeaderNames)
+        }
+
+        // The request body's Content-Type comes from the request, the response
+        // body's from the response — never reused across the two.
+        var requestBodyResult: BodyCapture.Result = .absent
+        if let body = request.httpBody {
+            requestBodyResult = BodyCapture.capture(
+                body,
+                contentTypeHeader: request.value(forHTTPHeaderField: "Content-Type"),
+                role: .request,
+                sanitizer: sanitizer
+            )
+        } else if request.httpBodyStream != nil {
+            // Never read the stream.
+            requestBodyResult = .unavailable(.streamed, originalBytes: nil)
         }
 
         var responseHeaders: [String: String]?
@@ -430,12 +454,22 @@ public enum Tokiwatari {
             }
         }
 
+        var responseBodyResult: BodyCapture.Result = .absent
+        if let responseBody {
+            responseBodyResult = BodyCapture.capture(
+                responseBody,
+                contentTypeHeader: response?.value(forHTTPHeaderField: "Content-Type"),
+                role: .response,
+                sanitizer: sanitizer
+            )
+        }
+
         let payloadJson = EventPayloadEncoder.encodedPayload(
             EventPayloadEncoder.Components(
                 requestHeaders: requestHeaders,
-                requestBody: nil,
+                requestBody: requestBodyResult.payloadValue,
                 responseHeaders: responseHeaders,
-                responseBody: nil,
+                responseBody: responseBodyResult.payloadValue,
                 error: error.map(sanitizedErrorInfo)
             )
         )
@@ -483,8 +517,6 @@ public enum Tokiwatari {
         return Int(min(seconds * 1000, SanitizationLimits.maximumDurationMilliseconds).rounded())
     }
 
-    static let bodyExcerptByteLimit = 64 * 1024
-    static let redactedValue = "<redacted>"
     private static let defaultSensitiveHeaderNames: Set<String> = [
         "authorization",
         "proxy-authorization",
@@ -512,54 +544,6 @@ public enum Tokiwatari {
     /// so `access_token`, `accessToken` and `ACCESS-TOKEN` all match.
     static func normalizedBodyKey(_ key: some StringProtocol) -> String {
         key.lowercased().filter { $0 != "_" && $0 != "-" }
-    }
-
-    /// Body excerpt with sensitive JSON keys redacted first. Redaction must run
-    /// on the FULL body before the excerpt (a truncated body no longer parses
-    /// as JSON). `sensitiveKeys` must contain normalized keys.
-    static func redactedBodyExcerpt(_ data: Data, sensitiveKeys: Set<String>) -> (text: String, isTruncated: Bool) {
-        bodyExcerpt(redactedJSONBody(data, sensitiveKeys: sensitiveKeys) ?? data)
-    }
-
-    /// Returns nil — leaving the original bytes untouched — when the body is
-    /// not JSON or contains no sensitive keys.
-    static func redactedJSONBody(_ data: Data, sensitiveKeys: Set<String>) -> Data? {
-        guard let first = data.first,
-              first == UInt8(ascii: "{") || first == UInt8(ascii: "["),
-              let object = try? JSONSerialization.jsonObject(with: data)
-        else { return nil }
-
-        var didRedact = false
-        func redact(_ value: Any) -> Any {
-            switch value {
-            case let dictionary as [String: Any]:
-                var result: [String: Any] = [:]
-                result.reserveCapacity(dictionary.count)
-                for (key, entry) in dictionary {
-                    if sensitiveKeys.contains(normalizedBodyKey(key)) {
-                        result[key] = redactedValue
-                        didRedact = true
-                    } else {
-                        result[key] = redact(entry)
-                    }
-                }
-                return result
-            case let array as [Any]:
-                return array.map(redact)
-            default:
-                return value
-            }
-        }
-        let redacted = redact(object)
-        guard didRedact else { return nil }
-        return try? JSONSerialization.data(withJSONObject: redacted, options: [.sortedKeys])
-    }
-
-    static func bodyExcerpt(_ data: Data) -> (text: String, isTruncated: Bool) {
-        guard data.count > bodyExcerptByteLimit else {
-            return (String(decoding: data, as: UTF8.self), false)
-        }
-        return (String(decoding: data.prefix(bodyExcerptByteLimit), as: UTF8.self), true)
     }
 
     // MARK: JSON helpers
