@@ -26,8 +26,9 @@ func makeContractTimestampFormatter() -> DateFormatter {
 // MARK: - End-to-end helpers (shared global SDK state, so serialized)
 
 /// Tokiwatari's configuration is process-global; every test that goes through
-/// `configure` must hold this lock.
-let tokiwatariGlobalStateLock = NSLock()
+/// `configure` must hold this lock. The protected "value" is that global
+/// state, hence `Void`.
+let tokiwatariGlobalStateLock = Mutex<Void>(())
 
 struct RecordedEvent {
     var sessionId: String
@@ -78,35 +79,34 @@ func recordedEvents(
     maximumPayloadBytesForTesting: Int? = nil,
     _ body: () throws -> Void
 ) throws -> [RecordedEvent] {
-    tokiwatariGlobalStateLock.lock()
-    defer { tokiwatariGlobalStateLock.unlock() }
-
-    Tokiwatari.configure(
-        session: CountingSession(),
-        allowedQueryParameters: allowedQueryParameters,
-        additionalSensitiveHeaderNames: additionalSensitiveHeaderNames,
-        additionalSensitiveBodyKeys: additionalSensitiveBodyKeys,
-        maximumPayloadBytesForTesting: maximumPayloadBytesForTesting,
-        databaseURL: makeTemporaryDatabaseURL()
-    )
-    guard let database = Tokiwatari.databaseForTesting else {
-        throw TestSupportError.databaseUnavailable
-    }
-    try body()
-    try database.flushPendingWrites()
-    return try database.pool.read { db in
-        try Row.fetchAll(db, sql: "SELECT * FROM events ORDER BY session_sequence").map { row in
-            RecordedEvent(
-                sessionId: row["session_id"],
-                sessionSequence: row["session_sequence"],
-                eventKind: row["event_kind"],
-                identifier: row["identifier"],
-                httpMethod: row["http_method"],
-                url: row["url"],
-                statusCode: row["status_code"],
-                durationMs: row["duration_ms"],
-                payloadJson: row["payload_json"]
-            )
+    try tokiwatariGlobalStateLock.withLock { _ in
+        Tokiwatari.configure(
+            session: CountingSession(),
+            allowedQueryParameters: allowedQueryParameters,
+            additionalSensitiveHeaderNames: additionalSensitiveHeaderNames,
+            additionalSensitiveBodyKeys: additionalSensitiveBodyKeys,
+            maximumPayloadBytesForTesting: maximumPayloadBytesForTesting,
+            databaseURL: makeTemporaryDatabaseURL()
+        )
+        guard let database = Tokiwatari.databaseForTesting else {
+            throw TestSupportError.databaseUnavailable
+        }
+        try body()
+        try database.flushPendingWrites()
+        return try database.pool.read { db in
+            try Row.fetchAll(db, sql: "SELECT * FROM events ORDER BY session_sequence").map { row in
+                RecordedEvent(
+                    sessionId: row["session_id"],
+                    sessionSequence: row["session_sequence"],
+                    eventKind: row["event_kind"],
+                    identifier: row["identifier"],
+                    httpMethod: row["http_method"],
+                    url: row["url"],
+                    statusCode: row["status_code"],
+                    durationMs: row["duration_ms"],
+                    payloadJson: row["payload_json"]
+                )
+            }
         }
     }
 }
