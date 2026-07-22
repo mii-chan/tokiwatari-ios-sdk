@@ -264,6 +264,36 @@ final class TokiwatariDatabase: Sendable {
         }
     }
 
+    static let passiveCheckpointThresholdBytes = 1024 * 1024
+
+    /// Periodic maintenance (every 30s): retention purge, then WAL-size-gated
+    /// checkpoints. PASSIVE runs only when the WAL exists and is at least
+    /// `passiveCheckpointThresholdBytes` (it merely assists SQLite's own
+    /// ~1000-page auto checkpoint); TRUNCATE runs only when the WAL exceeds
+    /// `maximumRetainedWALSizeBytes`. Both are best-effort — busy is normal.
+    func performMaintenance(retainingSessions: Int) {
+        try? purge(keepingSessions: retainingSessions)
+        guard let walSize = walFileSizeBytes() else { return }
+        if walSize > maximumRetainedWALSizeBytes {
+            checkpointTruncate()
+        } else if walSize >= Self.passiveCheckpointThresholdBytes {
+            do {
+                _ = try pool.writeWithoutTransaction { db in
+                    try db.checkpoint(.passive)
+                }
+            } catch {
+                // Busy is a normal state.
+            }
+        }
+    }
+
+    func walFileSizeBytes() -> Int? {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: pool.path + "-wal") else {
+            return nil
+        }
+        return (attributes[.size] as? NSNumber)?.intValue
+    }
+
     /// `wal_checkpoint(TRUNCATE)`: keeps the WAL small and device snapshot
     /// pulls consistent.
     func checkpointTruncate() {
@@ -283,8 +313,7 @@ final class TokiwatariDatabase: Sendable {
             .appendingPathComponent("TokiwatariExports", isDirectory: true)
     }
 
-    /// Best-effort deletion of exports older than `exportTimeToLive`; runs at
-    /// configure time and before every export.
+    /// Best-effort deletion of expired exports at the next cleanup opportunity.
     static func cleanUpExpiredExports(now: Date = Date()) {
         let fileManager = FileManager.default
         guard let contents = try? fileManager.contentsOfDirectory(
@@ -305,6 +334,8 @@ final class TokiwatariDatabase: Sendable {
     /// file is generated, so the export inherits protection while still being
     /// written; attributes are re-applied to the finished file.
     func exportSnapshot() throws -> URL {
+        // Minimize the WAL before pulling a snapshot from the device.
+        checkpointTruncate()
         Self.cleanUpExpiredExports()
         let directory = Self.exportDirectoryURL()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

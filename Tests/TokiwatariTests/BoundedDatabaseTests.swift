@@ -129,5 +129,82 @@ import Testing
         #expect(limits[1] <= limits[0] + 1)
         #expect(limits[2] == limits[1])
     }
+
+    private func growWAL(_ database: TokiwatariDatabase, rows: Int = 200) throws {
+        let payload = String(repeating: "w", count: 8 * 1024)
+        try database.pool.write { db in
+            for sequence in 1...rows {
+                try makeEventRecord(sessionId: "wal", sequence: Int64(sequence), payload: payload).insert(db)
+            }
+        }
+    }
+
+    @Test func maintenanceRunsPassiveCheckpointWithoutTruncatingTheWAL() throws {
+        let database = try TokiwatariDatabase(url: makeTemporaryDatabaseURL())
+        try growWAL(database)
+        let sizeBefore = try #require(database.walFileSizeBytes())
+        #expect(sizeBefore >= TokiwatariDatabase.passiveCheckpointThresholdBytes)
+        #expect(sizeBefore <= database.maximumRetainedWALSizeBytes)
+
+        database.performMaintenance(retainingSessions: 10)
+
+        let sizeAfter = try #require(database.walFileSizeBytes())
+        #expect(sizeAfter >= sizeBefore)
+    }
+
+    @Test func maintenanceTruncatesOnlyWhenTheWALExceedsTheRetainedLimit() throws {
+        let database = try TokiwatariDatabase(
+            url: makeTemporaryDatabaseURL(),
+            maximumRetainedWALSizeBytes: 1 // clamped to the 256KB minimum
+        )
+        try growWAL(database)
+        let sizeBefore = try #require(database.walFileSizeBytes())
+        #expect(sizeBefore > database.maximumRetainedWALSizeBytes)
+
+        database.performMaintenance(retainingSessions: 10)
+
+        let sizeAfter = database.walFileSizeBytes() ?? 0
+        #expect(sizeAfter < database.maximumRetainedWALSizeBytes)
+    }
+
+    @Test func maintenanceAppliesSessionRetention() throws {
+        let database = try TokiwatariDatabase(url: makeTemporaryDatabaseURL())
+        try database.pool.write { db in
+            for sessionIndex in 1...12 {
+                try makeEventRecord(
+                    sessionId: String(format: "s%02d", sessionIndex),
+                    sequence: Int64(sessionIndex),
+                    payload: nil
+                ).insert(db)
+            }
+        }
+
+        database.performMaintenance(retainingSessions: 10)
+
+        let sessionCount = try database.pool.read {
+            try Int.fetchOne($0, sql: "SELECT COUNT(DISTINCT session_id) FROM events")
+        }
+        #expect(sessionCount == 10)
+    }
+
+    @Test func busyTruncateDoesNotFailRecording() throws {
+        let database = try TokiwatariDatabase(
+            url: makeTemporaryDatabaseURL(),
+            maximumRetainedWALSizeBytes: 1
+        )
+        try growWAL(database)
+        // A live snapshot pins the WAL, so TRUNCATE stays busy.
+        let snapshot = try database.pool.makeSnapshot()
+
+        database.performMaintenance(retainingSessions: 10)
+
+        database.insertAsync(makeEventRecord(sessionId: "busy", sequence: 1, payload: "{}"))
+        try database.flushPendingWrites()
+        let count = try database.pool.read {
+            try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM events WHERE session_id = 'busy'")
+        }
+        #expect(count == 1)
+        snapshot.read { _ in }
+    }
 }
 #endif

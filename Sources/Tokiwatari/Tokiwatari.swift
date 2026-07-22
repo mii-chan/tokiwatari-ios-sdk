@@ -177,6 +177,7 @@ public enum Tokiwatari {
         var sensitiveBodyKeys: Set<String> = Tokiwatari.defaultSensitiveBodyKeys
         var allowedQueryParameters: Set<String> = []
         var maximumPayloadBytes: Int = SanitizationLimits.maximumPayloadBytes
+        var retentionSessions: Int = 10
         // Watermark for the sequence-monotonicity assertion in nextEventSlot().
         var lastSessionId: String?
         var lastSequence: Int64 = 0
@@ -269,6 +270,7 @@ public enum Tokiwatari {
             s.sensitiveBodyKeys = defaultSensitiveBodyKeys.union(bodyKeys)
             s.allowedQueryParameters = queryParameters
             s.maximumPayloadBytes = maximumPayloadBytesForTesting ?? SanitizationLimits.maximumPayloadBytes
+            s.retentionSessions = max(1, retentionSessions)
             s.lastSessionId = nil
             s.lastSequence = 0
         }
@@ -357,11 +359,10 @@ public enum Tokiwatari {
         }
         guard isFirst else { return }
 
-        // Periodic wal_checkpoint(TRUNCATE): the background-transition hook
-        // below never fires while debugging in the foreground.
+        // Periodic export, retention and WAL maintenance.
         let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
         timer.schedule(deadline: .now() + checkpointInterval, repeating: checkpointInterval)
-        timer.setEventHandler { Tokiwatari.checkpointDatabase() }
+        timer.setEventHandler { Tokiwatari.performDatabaseMaintenance() }
         timer.resume()
         checkpointTimer.withLock { $0 = timer }
 
@@ -373,10 +374,19 @@ public enum Tokiwatari {
             queue: nil
         ) { _ in
             Tokiwatari.checkpointDatabase()
+            TokiwatariDatabase.cleanUpExpiredExports()
         }
         #endif
     }
 
+    static func performDatabaseMaintenance() {
+        TokiwatariDatabase.cleanUpExpiredExports()
+        let (database, retained) = state.withLock { ($0.database, $0.retentionSessions) }
+        database?.performMaintenance(retainingSessions: retained)
+    }
+
+    /// Background transition: best-effort TRUNCATE so a device pull sees a
+    /// minimal WAL.
     static func checkpointDatabase() {
         let database = state.withLock { $0.database }
         database?.checkpointTruncate()

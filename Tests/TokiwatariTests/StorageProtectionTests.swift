@@ -116,6 +116,29 @@ import Testing
         #expect(FileManager.default.fileExists(atPath: fresh.path))
     }
 
+    @Test func periodicMaintenanceRemovesExpiredExports() throws {
+        try tokiwatariGlobalStateLock.withLock { _ in
+            let directory = TokiwatariDatabase.exportDirectoryURL()
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let expired = directory.appendingPathComponent("tokiwatari-\(UUID().uuidString).sqlite")
+            let fresh = directory.appendingPathComponent("tokiwatari-\(UUID().uuidString).sqlite")
+            FileManager.default.createFile(atPath: expired.path, contents: Data("x".utf8))
+            FileManager.default.createFile(atPath: fresh.path, contents: Data("x".utf8))
+            defer { try? FileManager.default.removeItem(at: fresh) }
+            try FileManager.default.setAttributes(
+                [.modificationDate: Date().addingTimeInterval(-TokiwatariDatabase.exportTimeToLive - 3600)],
+                ofItemAtPath: expired.path
+            )
+
+            // Expired exports must disappear on the maintenance tick alone,
+            // without a configure or export call.
+            Tokiwatari.performDatabaseMaintenance()
+
+            #expect(!FileManager.default.fileExists(atPath: expired.path))
+            #expect(FileManager.default.fileExists(atPath: fresh.path))
+        }
+    }
+
     #if os(iOS) && !targetEnvironment(simulator)
     @Test func databaseFilesUseCompleteUntilFirstUserAuthentication() throws {
         let url = makeTemporaryDatabaseURL()
