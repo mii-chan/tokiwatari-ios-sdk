@@ -5,7 +5,7 @@ import GRDB
 /// A row of the `events` table. The snake_case column names (via `CodingKeys`)
 /// and GRDB's `"yyyy-MM-dd HH:mm:ss.SSS"` UTC storage format for `timestamp`
 /// are both part of the CLI contract.
-struct EventRecord: Codable, FetchableRecord, PersistableRecord {
+struct EventRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     static let databaseTableName = "events"
 
     var sessionId: String
