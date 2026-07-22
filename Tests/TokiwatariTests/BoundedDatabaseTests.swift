@@ -206,5 +206,74 @@ import Testing
         #expect(count == 1)
         snapshot.read { _ in }
     }
+
+    @Test func fullDatabaseRecoversByPurgingTheOldestCompletedSession() throws {
+        let database = try TokiwatariDatabase(
+            url: makeTemporaryDatabaseURL(),
+            maximumMainDatabaseSizeBytes: 1,
+            maximumRetainedWALSizeBytes: 1
+        )
+        let filled = try fillToCapacity(database, sessionId: "old")
+        #expect(filled > 0)
+
+        // Small rows can still fit into partially-filled pages; a page-sized
+        // payload reliably re-triggers SQLITE_FULL.
+        database.insertAsync(makeEventRecord(
+            sessionId: "new",
+            sequence: 1,
+            payload: String(repeating: "n", count: 8 * 1024)
+        ))
+        try database.flushPendingWrites()
+
+        let newCount = try database.pool.read {
+            try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM events WHERE session_id = 'new'")
+        }
+        let oldCount = try database.pool.read {
+            try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM events WHERE session_id = 'old'")
+        }
+        #expect(newCount == 1)
+        #expect(oldCount == 0)
+    }
+
+    @Test func fullDatabaseWithOnlyTheCurrentSessionChunkPurgesItsOldestEvents() throws {
+        let database = try TokiwatariDatabase(
+            url: makeTemporaryDatabaseURL(),
+            maximumMainDatabaseSizeBytes: 1,
+            maximumRetainedWALSizeBytes: 1
+        )
+        let filled = try fillToCapacity(database, sessionId: "current")
+        #expect(filled > Int64(TokiwatariDatabase.fullRecoveryPreservedTail))
+
+        database.insertAsync(makeEventRecord(
+            sessionId: "current",
+            sequence: filled + 1,
+            payload: String(repeating: "n", count: 8 * 1024)
+        ))
+        try database.flushPendingWrites()
+
+        let insertedCount = try database.pool.read { db in
+            try Int.fetchOne(
+                db,
+                sql: "SELECT COUNT(*) FROM events WHERE session_id = 'current' AND session_sequence = ?",
+                arguments: [filled + 1]
+            )
+        }
+        let oldestSurvives = try database.pool.read { db in
+            try Int.fetchOne(
+                db,
+                sql: "SELECT COUNT(*) FROM events WHERE session_id = 'current' AND session_sequence = 1"
+            )
+        }
+        let newestOldRowSurvives = try database.pool.read { db in
+            try Int.fetchOne(
+                db,
+                sql: "SELECT COUNT(*) FROM events WHERE session_id = 'current' AND session_sequence = ?",
+                arguments: [filled]
+            )
+        }
+        #expect(insertedCount == 1)
+        #expect(oldestSurvives == 0)
+        #expect(newestOldRowSurvives == 1)
+    }
 }
 #endif

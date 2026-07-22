@@ -235,15 +235,86 @@ final class TokiwatariDatabase: Sendable {
         try Self.applyStorageAttributes(toDatabaseAt: url)
     }
 
-    /// Asynchronous insert on GRDB's serial writer queue (never blocks the caller).
+    static let fullRecoveryChunkSize = 200
+    static let fullRecoveryPreservedTail = 50
+
+    /// Asynchronous insert on GRDB's serial writer queue (never blocks the
+    /// caller). SQLITE_FULL — which can also mean real disk exhaustion — is
+    /// handled with a bounded retry: each purge runs in a NEW transaction
+    /// after the failed insert rolled back, and the final failure drops the
+    /// event without ever trying to log the failure into the database.
     func insertAsync(_ record: EventRecord) {
-        pool.asyncWrite({ db in
-            try record.insert(db)
-        }, completion: { _, result in
-            if case .failure(let error) = result {
-                print("Tokiwatari: failed to insert event: \(error)")
+        pool.asyncWriteWithoutTransaction { db in
+            var remainingRecoveries: ArraySlice<@Sendable (Database) throws -> Void> = [
+                { @Sendable db in try Self.purgeOldestCompletedSession(db, currentSessionId: record.sessionId) },
+                { @Sendable db in try Self.purgeOldestEventsOfCurrentSession(db, sessionId: record.sessionId) },
+            ][...]
+            while true {
+                do {
+                    try db.inTransaction {
+                        try record.insert(db)
+                        return .commit
+                    }
+                    return
+                } catch let error as DatabaseError where error.resultCode == .SQLITE_FULL {
+                    guard let recovery = remainingRecoveries.popFirst() else {
+                        print("Tokiwatari: dropped an event after SQLITE_FULL retries")
+                        return
+                    }
+                    do {
+                        try db.inTransaction {
+                            try recovery(db)
+                            return .commit
+                        }
+                    } catch {
+                        // The purge itself can fail when the disk is full.
+                    }
+                } catch {
+                    print("Tokiwatari: failed to insert event: \(error)")
+                    return
+                }
             }
-        })
+        }
+    }
+
+    private static func purgeOldestCompletedSession(_ db: Database, currentSessionId: String) throws {
+        try db.execute(
+            sql: """
+            DELETE FROM events WHERE session_id = (
+              SELECT session_id
+              FROM events
+              WHERE session_id <> ?
+              GROUP BY session_id
+              ORDER BY MAX(timestamp) ASC
+              LIMIT 1
+            )
+            """,
+            arguments: [currentSessionId]
+        )
+    }
+
+    /// Chunk purge of the current session's oldest events — never the whole
+    /// current session.
+    private static func purgeOldestEventsOfCurrentSession(_ db: Database, sessionId: String) throws {
+        let count = try Int.fetchOne(
+            db,
+            sql: "SELECT COUNT(*) FROM events WHERE session_id = ?",
+            arguments: [sessionId]
+        ) ?? 0
+        let deletable = min(fullRecoveryChunkSize, max(0, count - fullRecoveryPreservedTail))
+        guard deletable > 0 else { return }
+        try db.execute(
+            sql: """
+            DELETE FROM events
+            WHERE session_id = ? AND session_sequence IN (
+              SELECT session_sequence FROM events
+              WHERE session_id = ?
+              ORDER BY session_sequence ASC
+              LIMIT ?
+            )
+            """,
+            arguments: [sessionId, sessionId, deletable]
+        )
     }
 
     func purge(keepingSessions retentionSessions: Int) throws {
