@@ -24,9 +24,6 @@ public enum Tokiwatari {
     ///   - session: session provider shared by the UI and API loggers.
     ///   - retentionSessions: number of most-recent sessions to keep; all rows
     ///     of older sessions are deleted at configure time.
-    ///   - underlyingURLProtocols: `URLProtocol` classes inserted into the
-    ///     internal URLSession that performs the actual transfer — the
-    ///     mock-injection hook for tests/playgrounds.
     ///   - additionalSensitiveHeaderNames: header names (case-insensitive)
     ///     recorded as `<redacted>`, in addition to the built-in set. Built-ins
     ///     cannot be opted out of.
@@ -36,7 +33,6 @@ public enum Tokiwatari {
     public static func configure(
         session: any TokiwatariSessionProviding = TokiwatariLogSession(),
         retentionSessions: Int = 10,
-        underlyingURLProtocols: [AnyClass] = [],
         additionalSensitiveHeaderNames: [String] = [],
         additionalSensitiveBodyKeys: [String] = []
     ) {
@@ -44,7 +40,6 @@ public enum Tokiwatari {
         configure(
             session: session,
             retentionSessions: retentionSessions,
-            underlyingURLProtocols: underlyingURLProtocols,
             additionalSensitiveHeaderNames: additionalSensitiveHeaderNames,
             additionalSensitiveBodyKeys: additionalSensitiveBodyKeys,
             databaseURL: nil
@@ -108,25 +103,12 @@ public enum Tokiwatari {
         #endif
     }
 
-    /// Inserts `TokiwatariURLProtocol` at the front of the configuration's
-    /// `protocolClasses`. (`URLSession.shared` is already covered: `configure`
-    /// calls `URLProtocol.registerClass`.)
-    public static func enableAPILogging(in configuration: URLSessionConfiguration) {
-        #if DEBUG
-        var protocolClasses = configuration.protocolClasses ?? []
-        protocolClasses.removeAll { $0 == TokiwatariURLProtocol.self }
-        protocolClasses.insert(TokiwatariURLProtocol.self, at: 0)
-        configuration.protocolClasses = protocolClasses
-        #endif
-    }
-
     // MARK: - Internal (DEBUG only)
 
     #if DEBUG
     private struct GlobalState {
         var session: (any TokiwatariSessionProviding)?
         var database: TokiwatariDatabase?
-        var underlyingURLProtocols: [AnyClass] = []
         var sensitiveHeaderNames: Set<String> = Tokiwatari.defaultSensitiveHeaderNames
         var sensitiveBodyKeys: Set<String> = Tokiwatari.defaultSensitiveBodyKeys
         // Watermark for the sequence-monotonicity assertion in nextEventSlot().
@@ -143,7 +125,6 @@ public enum Tokiwatari {
     static func configure(
         session: any TokiwatariSessionProviding,
         retentionSessions: Int,
-        underlyingURLProtocols: [AnyClass],
         additionalSensitiveHeaderNames: [String] = [],
         additionalSensitiveBodyKeys: [String] = [],
         databaseURL: URL?
@@ -160,7 +141,6 @@ public enum Tokiwatari {
         state.withLock { s in
             s.session = session
             s.database = database
-            s.underlyingURLProtocols = underlyingURLProtocols
             s.sensitiveHeaderNames = defaultSensitiveHeaderNames
                 .union(additionalSensitiveHeaderNames.map { $0.lowercased() })
             s.sensitiveBodyKeys = defaultSensitiveBodyKeys
@@ -178,9 +158,6 @@ public enum Tokiwatari {
             return true
         }
         guard isFirst else { return }
-
-        // Makes API logging work for URLSession.shared as well.
-        URLProtocol.registerClass(TokiwatariURLProtocol.self)
 
         // Periodic wal_checkpoint(TRUNCATE): the background-transition hook
         // below never fires while debugging in the foreground.
@@ -211,10 +188,6 @@ public enum Tokiwatari {
         state.withLock { $0.database != nil }
     }
 
-    static var underlyingURLProtocolsForInnerSession: [AnyClass] {
-        state.withLock { $0.underlyingURLProtocols }
-    }
-
     static var databaseForTesting: TokiwatariDatabase? {
         state.withLock { $0.database }
     }
@@ -243,7 +216,7 @@ public enum Tokiwatari {
         }
     }
 
-    // MARK: API event recording (called by TokiwatariURLProtocol)
+    // MARK: API event recording
 
     static let bodyExcerptByteLimit = 64 * 1024
     static let redactedValue = "<redacted>"
@@ -269,98 +242,6 @@ public enum Tokiwatari {
         "clientsecret",
         "authorization",
     ]
-
-    static func recordAPIEvent(
-        request: URLRequest,
-        requestBody: Data?,
-        response: HTTPURLResponse?,
-        responseBody: Data?,
-        error: (any Error)?,
-        start: Date,
-        end: Date
-    ) {
-        guard let slot = nextEventSlot() else { return }
-        let (sensitiveNames, sensitiveBodyKeys) = state.withLock {
-            ($0.sensitiveHeaderNames, $0.sensitiveBodyKeys)
-        }
-
-        var payload: [String: Any] = [:]
-
-        var requestInfo: [String: Any] = [:]
-        if let headers = request.allHTTPHeaderFields, !headers.isEmpty {
-            requestInfo["headers"] = redactedHeaders(headers, sensitiveNames: sensitiveNames)
-        }
-        if let requestBody {
-            let (text, isTruncated) = redactedBodyExcerpt(requestBody, sensitiveKeys: sensitiveBodyKeys)
-            requestInfo["body"] = text
-            if isTruncated { requestInfo["body_truncated"] = true }
-        }
-        if !requestInfo.isEmpty { payload["request"] = requestInfo }
-
-        if let response {
-            var responseInfo: [String: Any] = [:]
-            var headers: [String: String] = [:]
-            for (name, value) in response.allHeaderFields {
-                if let name = name as? String {
-                    headers[name] = "\(value)"
-                }
-            }
-            if !headers.isEmpty { responseInfo["headers"] = redactedHeaders(headers, sensitiveNames: sensitiveNames) }
-            if let responseBody {
-                let (text, isTruncated) = redactedBodyExcerpt(responseBody, sensitiveKeys: sensitiveBodyKeys)
-                responseInfo["body"] = text
-                if isTruncated { responseInfo["body_truncated"] = true }
-            }
-            if !responseInfo.isEmpty { payload["response"] = responseInfo }
-        }
-
-        if let error {
-            payload["error"] = String(describing: error)
-        }
-
-        let record = EventRecord(
-            sessionId: slot.sessionId,
-            sessionSequence: slot.sequence,
-            timestamp: end,
-            eventKind: "api",
-            identifier: graphQLIdentifier(requestBody: requestBody),
-            httpMethod: request.httpMethod,
-            url: request.url?.absoluteString,
-            statusCode: response?.statusCode,
-            durationMs: Int((end.timeIntervalSince(start) * 1000).rounded()),
-            payloadJson: payload.isEmpty ? nil : jsonString(fromJSONObject: payload)
-        )
-        slot.database.insertAsync(record)
-    }
-
-    /// Identifier for GraphQL api rows: `GraphQL:<Type>:<Name>`
-    /// (`GraphQL:<Type>` for anonymous operations). A request counts as GraphQL
-    /// when its body is a JSON object with a string `query` field; every other
-    /// api row keeps identifier NULL.
-    static func graphQLIdentifier(requestBody: Data?) -> String? {
-        guard let requestBody,
-              requestBody.first == UInt8(ascii: "{"),
-              let object = (try? JSONSerialization.jsonObject(with: requestBody)) as? [String: Any],
-              let document = object["query"] as? String
-        else { return nil }
-
-        func typeSegment(_ keyword: some StringProtocol) -> String {
-            keyword.prefix(1).uppercased() + keyword.dropFirst()
-        }
-        let definitions = document.matches(of: /\b(query|mutation|subscription)\s+([_A-Za-z][_0-9A-Za-z]*)/)
-
-        if let name = object["operationName"] as? String, !name.isEmpty {
-            // Multi-operation documents: operationName picks the one executed.
-            let keyword = definitions.first { $0.2 == name }?.1 ?? definitions.first?.1 ?? "query"
-            return "GraphQL:\(typeSegment(keyword)):\(name)"
-        }
-        if let first = definitions.first {
-            return "GraphQL:\(typeSegment(first.1)):\(first.2)"
-        }
-        let trimmed = document.drop(while: \.isWhitespace)
-        let keyword = ["mutation", "subscription"].first { trimmed.hasPrefix($0) } ?? "query"
-        return "GraphQL:\(typeSegment(keyword))"
-    }
 
     /// `sensitiveNames` must contain lowercased names.
     static func redactedHeaders(
