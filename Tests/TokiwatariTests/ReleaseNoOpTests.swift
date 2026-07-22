@@ -14,7 +14,9 @@ import Tokiwatari
             appropriateFor: nil,
             create: false
         )
-        let databaseURL = supportDirectory.appendingPathComponent("tokiwatari_debug_events.sqlite")
+        let databaseDirectory = supportDirectory.appendingPathComponent("Tokiwatari", isDirectory: true)
+        let databaseURL = databaseDirectory.appendingPathComponent("tokiwatari_debug_events.sqlite")
+        let directoryExistedBefore = FileManager.default.fileExists(atPath: databaseDirectory.path)
         let existedBefore = FileManager.default.fileExists(atPath: databaseURL.path)
 
         Tokiwatari.configure()
@@ -28,6 +30,7 @@ import Tokiwatari
             end: Date()
         )
 
+        #expect(FileManager.default.fileExists(atPath: databaseDirectory.path) == directoryExistedBefore)
         #expect(FileManager.default.fileExists(atPath: databaseURL.path) == existedBefore)
         #expect(!Tokiwatari.isActive)
         #expect(throws: Tokiwatari.ExportError.self) {

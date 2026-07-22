@@ -251,6 +251,9 @@ public enum Tokiwatari {
             bodyKeys = try validatedSensitiveEntries(additionalSensitiveBodyKeys, kind: .bodyKey) {
                 normalizedBodyKey($0)
             }
+            if databaseURL == nil {
+                try TokiwatariDatabase.removeLegacyDatabase()
+            }
             let url = try databaseURL ?? TokiwatariDatabase.defaultDatabaseURL()
             let db = try TokiwatariDatabase(url: url)
             try db.purge(keepingSessions: max(1, retentionSessions))
