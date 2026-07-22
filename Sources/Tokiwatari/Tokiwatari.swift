@@ -84,16 +84,23 @@ public enum Tokiwatari {
 
     /// Records a UI event on the debug timeline
     /// (`event_kind = 'ui'`, `payload_json = parameters`).
+    ///
+    /// Parameters go through the same recursive key redaction as API bodies.
+    /// `identifier` is NOT subject to redaction — never put secrets in it.
     public static func log(_ event: TokiwatariEvent) {
         #if DEBUG
-        let payloadJson = jsonString(fromJSONObject: event.parameters)
+        guard let context = sanitizationContext() else { return }
+        let payloadJson = sanitizedUIPayloadJSON(event.parameters, sanitizer: context.sanitizer)
         guard let slot = nextEventSlot() else { return }
         let record = EventRecord(
             sessionId: slot.sessionId,
             sessionSequence: slot.sequence,
             timestamp: Date(),
             eventKind: "ui",
-            identifier: event.identifier,
+            identifier: StringSanitizer.sanitized(
+                event.identifier,
+                maximumBytes: SanitizationLimits.identifierByteLimit
+            ),
             httpMethod: nil,
             url: nil,
             statusCode: nil,
@@ -546,31 +553,22 @@ public enum Tokiwatari {
         key.lowercased().filter { $0 != "_" && $0 != "-" }
     }
 
-    // MARK: JSON helpers
+    // MARK: UI payload
 
-    static func jsonString(fromJSONObject object: [String: Any]) -> String? {
-        guard !object.isEmpty else { return nil }
-        let sanitized = sanitizedJSONValue(object)
-        guard let data = try? JSONSerialization.data(withJSONObject: sanitized, options: [.sortedKeys]) else {
-            return nil
-        }
-        return String(decoding: data, as: UTF8.self)
-    }
-
-    private static func sanitizedJSONValue(_ value: Any) -> Any {
-        switch value {
-        case let dictionary as [String: Any]:
-            return dictionary.mapValues { sanitizedJSONValue($0) }
-        case let array as [Any]:
-            return array.map { sanitizedJSONValue($0) }
-        case let string as String:
-            return string
-        case let number as NSNumber:
-            return number
-        case is NSNull:
-            return NSNull()
-        default:
-            return String(describing: value)
+    /// Fail-closed UI parameter sanitization: unsupported values become
+    /// `<unsupported>`, cyclic or over-complex parameter graphs replace the
+    /// whole payload with a drop marker.
+    static func sanitizedUIPayloadJSON(_ parameters: [String: Any], sanitizer: JSONSanitizer) -> String? {
+        guard !parameters.isEmpty else { return nil }
+        let dropped = #"{"payload_dropped":"invalid_or_cyclic_parameters"}"#
+        do {
+            let sanitized = try sanitizer.sanitized(parameters)
+            guard let data = try? JSONSerialization.data(withJSONObject: sanitized, options: [.sortedKeys]) else {
+                return dropped
+            }
+            return String(decoding: data, as: UTF8.self)
+        } catch {
+            return dropped
         }
     }
     #endif
