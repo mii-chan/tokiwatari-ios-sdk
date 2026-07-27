@@ -8,8 +8,18 @@ final class TokiwatariDatabase: Sendable {
     static let schemaVersion = 1
 
     let pool: DatabasePool
+    let maximumRetainedWALSizeBytes: Int
+    /// Actual limits reported back by SQLite — an existing database larger
+    /// than the requested cap raises `max_page_count` to its current size.
+    let effectiveMaxPageCount: Int64
+    let effectiveJournalSizeLimit: Int64
 
     static let databaseFileName = "tokiwatari_debug_events.sqlite"
+    static let minimumMainDatabaseSizeBytes = 1024 * 1024
+    static let minimumRetainedWALSizeBytes = 256 * 1024
+    /// Transient page allowance for opening a full database; withdrawn at the
+    /// end of `init` so reopening cannot ratchet the cap up.
+    static let openingPageHeadroom: Int64 = 16
 
     static func defaultDatabaseURL() throws -> URL {
         try supportDirectoryURL()
@@ -124,12 +134,39 @@ final class TokiwatariDatabase: Sendable {
         }
     }
 
-    init(url: URL) throws {
+    init(
+        url: URL,
+        maximumMainDatabaseSizeBytes: Int = 128 * 1024 * 1024,
+        maximumRetainedWALSizeBytes: Int = 16 * 1024 * 1024
+    ) throws {
+        assert(
+            maximumMainDatabaseSizeBytes > 0 && maximumRetainedWALSizeBytes > 0,
+            "Tokiwatari: database size limits must be positive"
+        )
+        // Clamp BEFORE any PRAGMA runs; a non-positive journal_size_limit
+        // would mean "unlimited".
+        let databaseLimit = Int64(max(Self.minimumMainDatabaseSizeBytes, maximumMainDatabaseSizeBytes))
+        let walLimit = Int64(max(Self.minimumRetainedWALSizeBytes, maximumRetainedWALSizeBytes))
+        self.maximumRetainedWALSizeBytes = Int(walLimit)
+
         try Self.prepareDirectory(url.deletingLastPathComponent())
 
         var configuration = Configuration()
         configuration.prepareDatabase { db in
             try db.execute(sql: "PRAGMA synchronous = NORMAL")
+            // DatabasePool runs this for readers too; size pragmas are writer-only.
+            guard !db.configuration.readonly else { return }
+            let pageSize = try Int64.fetchOne(db, sql: "PRAGMA page_size") ?? 4096
+            let currentPageCount = try Int64.fetchOne(db, sql: "PRAGMA page_count") ?? 0
+            let requestedPageCount = max(1, databaseLimit / pageSize)
+            // Transient opening headroom: pool bootstrap must be able to
+            // allocate a page even on a full database (GRDB's WAL-creating
+            // `grdb_issue_102` probe). The steady-state cap is re-applied
+            // WITHOUT headroom at the end of `init`.
+            let appliedPageCount = max(requestedPageCount, currentPageCount + Self.openingPageHeadroom)
+            // No placeholders for these pragmas — interpolate validated integers only.
+            _ = try Int64.fetchOne(db, sql: "PRAGMA max_page_count = \(appliedPageCount)")
+            _ = try Int64.fetchOne(db, sql: "PRAGMA journal_size_limit = \(walLimit)")
         }
         // DatabasePool activates WAL journal mode automatically.
         var pool = try DatabasePool(path: url.path, configuration: configuration)
@@ -175,21 +212,109 @@ final class TokiwatariDatabase: Sendable {
             try db.execute(sql: "PRAGMA user_version = \(Self.schemaVersion)")
         }
 
+        // Withdraw the opening headroom and verify the effective values on
+        // the writer: the steady-state cap is the requested size, or the
+        // database's current size if that is already larger — never more.
+        // SQLite itself never lets max_page_count drop below the current page
+        // count, so an over-cap database keeps its pages and simply cannot
+        // grow. The writer connection is permanent, so the value sticks.
+        let effective = try pool.write { db in
+            let pageSize = try Int64.fetchOne(db, sql: "PRAGMA page_size") ?? 4096
+            let currentPageCount = try Int64.fetchOne(db, sql: "PRAGMA page_count") ?? 0
+            let steadyPageCount = max(max(1, databaseLimit / pageSize), currentPageCount)
+            _ = try Int64.fetchOne(db, sql: "PRAGMA max_page_count = \(steadyPageCount)")
+            return (pageCount: try Int64.fetchOne(db, sql: "PRAGMA max_page_count") ?? 0,
+                    journalLimit: try Int64.fetchOne(db, sql: "PRAGMA journal_size_limit") ?? 0)
+        }
+        self.effectiveMaxPageCount = effective.pageCount
+        self.effectiveJournalSizeLimit = effective.journalLimit
+
         // Apply and verify the real file attributes after open; failure
         // propagates and leaves the SDK inactive rather than logging into
         // unprotected files.
         try Self.applyStorageAttributes(toDatabaseAt: url)
     }
 
-    /// Asynchronous insert on GRDB's serial writer queue (never blocks the caller).
+    static let fullRecoveryChunkSize = 200
+    static let fullRecoveryPreservedTail = 50
+
+    /// Asynchronous insert on GRDB's serial writer queue (never blocks the
+    /// caller). SQLITE_FULL — which can also mean real disk exhaustion — is
+    /// handled with a bounded retry: each purge runs in a NEW transaction
+    /// after the failed insert rolled back, and the final failure drops the
+    /// event without ever trying to log the failure into the database.
     func insertAsync(_ record: EventRecord) {
-        pool.asyncWrite({ db in
-            try record.insert(db)
-        }, completion: { _, result in
-            if case .failure(let error) = result {
-                print("Tokiwatari: failed to insert event: \(error)")
+        pool.asyncWriteWithoutTransaction { db in
+            var remainingRecoveries: ArraySlice<@Sendable (Database) throws -> Void> = [
+                { @Sendable db in try Self.purgeOldestCompletedSession(db, currentSessionId: record.sessionId) },
+                { @Sendable db in try Self.purgeOldestEventsOfCurrentSession(db, sessionId: record.sessionId) },
+            ][...]
+            while true {
+                do {
+                    try db.inTransaction {
+                        try record.insert(db)
+                        return .commit
+                    }
+                    return
+                } catch let error as DatabaseError where error.resultCode == .SQLITE_FULL {
+                    guard let recovery = remainingRecoveries.popFirst() else {
+                        print("Tokiwatari: dropped an event after SQLITE_FULL retries")
+                        return
+                    }
+                    do {
+                        try db.inTransaction {
+                            try recovery(db)
+                            return .commit
+                        }
+                    } catch {
+                        // The purge itself can fail when the disk is full.
+                    }
+                } catch {
+                    print("Tokiwatari: failed to insert event: \(error)")
+                    return
+                }
             }
-        })
+        }
+    }
+
+    private static func purgeOldestCompletedSession(_ db: Database, currentSessionId: String) throws {
+        try db.execute(
+            sql: """
+            DELETE FROM events WHERE session_id = (
+              SELECT session_id
+              FROM events
+              WHERE session_id <> ?
+              GROUP BY session_id
+              ORDER BY MAX(timestamp) ASC
+              LIMIT 1
+            )
+            """,
+            arguments: [currentSessionId]
+        )
+    }
+
+    /// Chunk purge of the current session's oldest events — never the whole
+    /// current session.
+    private static func purgeOldestEventsOfCurrentSession(_ db: Database, sessionId: String) throws {
+        let count = try Int.fetchOne(
+            db,
+            sql: "SELECT COUNT(*) FROM events WHERE session_id = ?",
+            arguments: [sessionId]
+        ) ?? 0
+        let deletable = min(fullRecoveryChunkSize, max(0, count - fullRecoveryPreservedTail))
+        guard deletable > 0 else { return }
+        try db.execute(
+            sql: """
+            DELETE FROM events
+            WHERE session_id = ? AND session_sequence IN (
+              SELECT session_sequence FROM events
+              WHERE session_id = ?
+              ORDER BY session_sequence ASC
+              LIMIT ?
+            )
+            """,
+            arguments: [sessionId, sessionId, deletable]
+        )
     }
 
     func purge(keepingSessions retentionSessions: Int) throws {
@@ -208,6 +333,36 @@ final class TokiwatariDatabase: Sendable {
                 arguments: [max(0, retentionSessions)]
             )
         }
+    }
+
+    static let passiveCheckpointThresholdBytes = 1024 * 1024
+
+    /// Periodic maintenance (every 30s): retention purge, then WAL-size-gated
+    /// checkpoints. PASSIVE runs only when the WAL exists and is at least
+    /// `passiveCheckpointThresholdBytes` (it merely assists SQLite's own
+    /// ~1000-page auto checkpoint); TRUNCATE runs only when the WAL exceeds
+    /// `maximumRetainedWALSizeBytes`. Both are best-effort — busy is normal.
+    func performMaintenance(retainingSessions: Int) {
+        try? purge(keepingSessions: retainingSessions)
+        guard let walSize = walFileSizeBytes() else { return }
+        if walSize > maximumRetainedWALSizeBytes {
+            checkpointTruncate()
+        } else if walSize >= Self.passiveCheckpointThresholdBytes {
+            do {
+                _ = try pool.writeWithoutTransaction { db in
+                    try db.checkpoint(.passive)
+                }
+            } catch {
+                // Busy is a normal state.
+            }
+        }
+    }
+
+    func walFileSizeBytes() -> Int? {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: pool.path + "-wal") else {
+            return nil
+        }
+        return (attributes[.size] as? NSNumber)?.intValue
     }
 
     /// `wal_checkpoint(TRUNCATE)`: keeps the WAL small and device snapshot
@@ -229,8 +384,7 @@ final class TokiwatariDatabase: Sendable {
             .appendingPathComponent("TokiwatariExports", isDirectory: true)
     }
 
-    /// Best-effort deletion of exports older than `exportTimeToLive`; runs at
-    /// configure time and before every export.
+    /// Best-effort deletion of expired exports at the next cleanup opportunity.
     static func cleanUpExpiredExports(now: Date = Date()) {
         let fileManager = FileManager.default
         guard let contents = try? fileManager.contentsOfDirectory(
@@ -251,6 +405,8 @@ final class TokiwatariDatabase: Sendable {
     /// file is generated, so the export inherits protection while still being
     /// written; attributes are re-applied to the finished file.
     func exportSnapshot() throws -> URL {
+        // Minimize the WAL before pulling a snapshot from the device.
+        checkpointTruncate()
         Self.cleanUpExpiredExports()
         let directory = Self.exportDirectoryURL()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

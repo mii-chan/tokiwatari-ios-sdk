@@ -176,16 +176,12 @@ public enum Tokiwatari {
         var sensitiveHeaderNames: Set<String> = Tokiwatari.defaultSensitiveHeaderNames
         var sensitiveBodyKeys: Set<String> = Tokiwatari.defaultSensitiveBodyKeys
         var allowedQueryParameters: Set<String> = []
-        var maximumMainDatabaseSizeBytes: Int = 128 * 1024 * 1024
-        var maximumRetainedWALSizeBytes: Int = 16 * 1024 * 1024
         var maximumPayloadBytes: Int = SanitizationLimits.maximumPayloadBytes
+        var retentionSessions: Int = 10
         // Watermark for the sequence-monotonicity assertion in nextEventSlot().
         var lastSessionId: String?
         var lastSequence: Int64 = 0
     }
-
-    static let minimumMainDatabaseSizeBytes = 1024 * 1024
-    static let minimumRetainedWALSizeBytes = 256 * 1024
 
     struct SanitizationContext {
         var sensitiveHeaderNames: Set<String>
@@ -256,7 +252,11 @@ public enum Tokiwatari {
             }
             TokiwatariDatabase.cleanUpExpiredExports()
             let url = try databaseURL ?? TokiwatariDatabase.defaultDatabaseURL()
-            let db = try TokiwatariDatabase(url: url)
+            let db = try TokiwatariDatabase(
+                url: url,
+                maximumMainDatabaseSizeBytes: maximumMainDatabaseSizeBytes,
+                maximumRetainedWALSizeBytes: maximumRetainedWALSizeBytes
+            )
             try db.purge(keepingSessions: max(1, retentionSessions))
             database = db
         } catch {
@@ -269,9 +269,8 @@ public enum Tokiwatari {
             s.sensitiveHeaderNames = defaultSensitiveHeaderNames.union(headerNames)
             s.sensitiveBodyKeys = defaultSensitiveBodyKeys.union(bodyKeys)
             s.allowedQueryParameters = queryParameters
-            s.maximumMainDatabaseSizeBytes = max(minimumMainDatabaseSizeBytes, maximumMainDatabaseSizeBytes)
-            s.maximumRetainedWALSizeBytes = max(minimumRetainedWALSizeBytes, maximumRetainedWALSizeBytes)
             s.maximumPayloadBytes = maximumPayloadBytesForTesting ?? SanitizationLimits.maximumPayloadBytes
+            s.retentionSessions = max(1, retentionSessions)
             s.lastSessionId = nil
             s.lastSequence = 0
         }
@@ -360,11 +359,10 @@ public enum Tokiwatari {
         }
         guard isFirst else { return }
 
-        // Periodic wal_checkpoint(TRUNCATE): the background-transition hook
-        // below never fires while debugging in the foreground.
+        // Periodic export, retention and WAL maintenance.
         let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
         timer.schedule(deadline: .now() + checkpointInterval, repeating: checkpointInterval)
-        timer.setEventHandler { Tokiwatari.checkpointDatabase() }
+        timer.setEventHandler { Tokiwatari.performDatabaseMaintenance() }
         timer.resume()
         checkpointTimer.withLock { $0 = timer }
 
@@ -376,10 +374,19 @@ public enum Tokiwatari {
             queue: nil
         ) { _ in
             Tokiwatari.checkpointDatabase()
+            TokiwatariDatabase.cleanUpExpiredExports()
         }
         #endif
     }
 
+    static func performDatabaseMaintenance() {
+        TokiwatariDatabase.cleanUpExpiredExports()
+        let (database, retained) = state.withLock { ($0.database, $0.retentionSessions) }
+        database?.performMaintenance(retainingSessions: retained)
+    }
+
+    /// Background transition: best-effort TRUNCATE so a device pull sees a
+    /// minimal WAL.
     static func checkpointDatabase() {
         let database = state.withLock { $0.database }
         database?.checkpointTruncate()
