@@ -1,3 +1,4 @@
+#if DEBUG
 import Foundation
 import GRDB
 import Testing
@@ -167,3 +168,4 @@ import Testing
         #expect(version == TokiwatariDatabase.schemaVersion)
     }
 }
+#endif

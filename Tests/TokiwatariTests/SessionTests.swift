@@ -1,3 +1,4 @@
+#if DEBUG
 import Foundation
 import Synchronization
 import Testing
@@ -72,3 +73,4 @@ import Testing
         #expect(session.next().sequence == 1)
     }
 }
+#endif
