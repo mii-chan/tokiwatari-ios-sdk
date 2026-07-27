@@ -137,7 +137,8 @@ final class TokiwatariDatabase: Sendable {
     init(
         url: URL,
         maximumMainDatabaseSizeBytes: Int = 128 * 1024 * 1024,
-        maximumRetainedWALSizeBytes: Int = 16 * 1024 * 1024
+        maximumRetainedWALSizeBytes: Int = 16 * 1024 * 1024,
+        removeItemForTesting: ((String) throws -> Void)? = nil
     ) throws {
         assert(
             maximumMainDatabaseSizeBytes > 0 && maximumRetainedWALSizeBytes > 0,
@@ -180,13 +181,12 @@ final class TokiwatariDatabase: Sendable {
         let isFreshDatabase = found.version == 0 && !found.hasEventsTable
         if !isFreshDatabase && found.version != Self.schemaVersion {
             try pool.close()
-            for suffix in ["", "-wal", "-shm"] {
-                try? FileManager.default.removeItem(atPath: url.path + suffix)
-            }
+            // Never re-stamp a surviving database with the current version.
+            try Self.removeDatabaseFiles(at: url, removeItem: removeItemForTesting ?? Self.defaultRemoveItem)
+            pool = try DatabasePool(path: url.path, configuration: configuration)
             print(
                 "Tokiwatari: schema version changed (found \(found.version), expected \(Self.schemaVersion)) — debug log was reset"
             )
-            pool = try DatabasePool(path: url.path, configuration: configuration)
         }
         self.pool = pool
 

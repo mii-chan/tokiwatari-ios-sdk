@@ -6,6 +6,27 @@ import Testing
 
 @Suite struct DatabaseTests {
 
+    private func createMismatchedDatabase(at url: URL) throws {
+        let database = try TokiwatariDatabase(url: url)
+        let record = EventRecord(
+            sessionId: "old-session",
+            sessionSequence: 1,
+            timestamp: Date(timeIntervalSince1970: 1_751_700_000),
+            eventKind: "ui",
+            identifier: "screen_viewed_home",
+            httpMethod: nil,
+            url: nil,
+            statusCode: nil,
+            durationMs: nil,
+            payloadJson: nil
+        )
+        try database.pool.write { db in
+            try record.insert(db)
+            try db.execute(sql: "PRAGMA user_version = 999")
+        }
+        try database.pool.close()
+    }
+
     @Test func eventRecordRoundtripUsesSnakeCaseColumnsAndContractTimestampFormat() throws {
         let database = try makeTemporaryDatabase()
         let date = Date(timeIntervalSince1970: 1_751_700_000.5)
@@ -133,29 +154,7 @@ import Testing
 
     @Test func mismatchedSchemaVersionDropsAndRecreatesTheDatabase() throws {
         let url = makeTemporaryDatabaseURL()
-
-        // Simulate a database written by a different SDK version: valid events
-        // table with one row, but a foreign user_version.
-        do {
-            let old = try TokiwatariDatabase(url: url)
-            let record = EventRecord(
-                sessionId: "old-session",
-                sessionSequence: 1,
-                timestamp: Date(timeIntervalSince1970: 1_751_700_000),
-                eventKind: "ui",
-                identifier: "screen_viewed_home",
-                httpMethod: nil,
-                url: nil,
-                statusCode: nil,
-                durationMs: nil,
-                payloadJson: nil
-            )
-            try old.pool.write { db in
-                try record.insert(db)
-                try db.execute(sql: "PRAGMA user_version = 999")
-            }
-            try old.pool.close()
-        }
+        try createMismatchedDatabase(at: url)
 
         let reopened = try TokiwatariDatabase(url: url)
         let rowCount = try reopened.pool.read {
@@ -166,6 +165,34 @@ import Testing
         }
         #expect(rowCount == 0)
         #expect(version == TokiwatariDatabase.schemaVersion)
+    }
+
+    @Test func mismatchedSchemaVersionIsNotRestampedWhenDeletionFails() throws {
+        let url = makeTemporaryDatabaseURL()
+        defer { try? TokiwatariDatabase.removeDatabaseFiles(at: url) }
+        try createMismatchedDatabase(at: url)
+
+        struct RemovalDenied: Error {}
+        #expect(throws: RemovalDenied.self) {
+            _ = try TokiwatariDatabase(
+                url: url,
+                removeItemForTesting: { _ in throw RemovalDenied() }
+            )
+        }
+
+        var configuration = Configuration()
+        configuration.readonly = true
+        let unchanged = try DatabaseQueue(path: url.path, configuration: configuration)
+        let snapshot = try unchanged.read { db in
+            (
+                count: try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM events"),
+                version: try Int.fetchOne(db, sql: "PRAGMA user_version")
+            )
+        }
+        try unchanged.close()
+
+        #expect(snapshot.count == 1)
+        #expect(snapshot.version == 999)
     }
 }
 #endif
