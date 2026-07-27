@@ -89,12 +89,26 @@ enum BodyCapture {
         return jsonCapture(body, role: role, sanitizer: sanitizer, contentTypeWasPresent: false)
     }
 
+    /// Strips a UTF-8 BOM and leading whitespace so BOM-prefixed JSON is
+    /// recognized deterministically.
+    static func normalizedJSONInput(_ body: Data) -> Data {
+        var body = body
+        if body.starts(with: [0xEF, 0xBB, 0xBF]) {
+            body = body.dropFirst(3)
+        }
+        while let first = body.first, first == 0x20 || first == 0x09 || first == 0x0A || first == 0x0D {
+            body = body.dropFirst()
+        }
+        return body
+    }
+
     private static func jsonCapture(
         _ body: Data,
         role: Role,
         sanitizer: JSONSanitizer,
         contentTypeWasPresent: Bool
     ) -> Result {
+        let body = normalizedJSONInput(body)
         guard let object = try? JSONSerialization.jsonObject(with: body, options: [.fragmentsAllowed]) else {
             return .unavailable(
                 contentTypeWasPresent ? .invalidJSON : .unsupportedContentType,
