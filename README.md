@@ -6,7 +6,7 @@ Record an iOS app's UI events and API traffic into a single SQLite timeline, sea
 
 ## Requirements
 
-- iOS 18+ / macOS 15+
+- iOS 17+ / macOS 14+
 - Swift 6.0+
 
 ## Installation
