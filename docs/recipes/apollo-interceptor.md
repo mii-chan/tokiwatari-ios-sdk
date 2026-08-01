@@ -28,21 +28,21 @@ Three pieces share a consume-once start-date store: one marks the start before t
 import Apollo
 import ApolloAPI
 import Foundation
-import Synchronization
+import os
 import Tokiwatari
 
 final class TokiwatariRequestClock: Sendable {
-    private let startDates = Mutex<[ObjectIdentifier: Date]>([:])
+    private let startDates = OSAllocatedUnfairLock<[ObjectIdentifier: Date]>(uncheckedState: [:])
 
     func markStart<Operation>(_ request: HTTPRequest<Operation>) {
-        startDates.withLock { $0[ObjectIdentifier(request)] = Date() }
+        startDates.withLockUnchecked { $0[ObjectIdentifier(request)] = Date() }
     }
 
     /// Consume-once: nil when the other side already took it. Every path must
     /// consume — a leaked entry could later collide with a reused object
     /// identifier and poison another request's duration.
     func takeStart<Operation>(_ request: HTTPRequest<Operation>) -> Date? {
-        startDates.withLock { $0.removeValue(forKey: ObjectIdentifier(request)) }
+        startDates.withLockUnchecked { $0.removeValue(forKey: ObjectIdentifier(request)) }
     }
 }
 

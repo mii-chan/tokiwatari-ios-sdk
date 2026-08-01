@@ -1,7 +1,6 @@
 #if DEBUG
 import Foundation
 import GRDB
-import Synchronization
 @testable import Tokiwatari
 
 func makeTemporaryDatabaseURL() -> URL {
