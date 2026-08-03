@@ -17,6 +17,9 @@ public enum Tokiwatari {
 
     // MARK: - Public API (exists in all configurations)
 
+    /// Default value of `configure`'s `retentionSessions` parameter.
+    public static let defaultRetentionSessions: Int = 5
+
     /// Initializes the SDK.
     ///
     /// Configuration failures leave the SDK inactive and raise a DEBUG
@@ -47,7 +50,7 @@ public enum Tokiwatari {
     public static func configure(
         session: any TokiwatariSessionProviding = TokiwatariLogSession(),
         allowedQueryParameters: [String] = [],
-        retentionSessions: Int = 10,
+        retentionSessions: Int = defaultRetentionSessions,
         maximumMainDatabaseSizeBytes: Int = 128 * 1024 * 1024,
         maximumRetainedWALSizeBytes: Int = 16 * 1024 * 1024,
         additionalSensitiveHeaderNames: [String] = [],
@@ -176,7 +179,7 @@ public enum Tokiwatari {
         var sensitiveBodyKeys: Set<String> = Tokiwatari.defaultSensitiveBodyKeys
         var allowedQueryParameters: Set<String> = []
         var maximumPayloadBytes: Int = SanitizationLimits.maximumPayloadBytes
-        var retentionSessions: Int = 10
+        var retentionSessions: Int = Tokiwatari.defaultRetentionSessions
         // Watermark for the sequence-monotonicity assertion in nextEventSlot().
         var lastSessionId: String?
         var lastSequence: Int64 = 0
@@ -214,7 +217,7 @@ public enum Tokiwatari {
     static func configure(
         session: any TokiwatariSessionProviding,
         allowedQueryParameters: [String] = [],
-        retentionSessions: Int = 10,
+        retentionSessions: Int = defaultRetentionSessions,
         maximumMainDatabaseSizeBytes: Int = 128 * 1024 * 1024,
         maximumRetainedWALSizeBytes: Int = 16 * 1024 * 1024,
         additionalSensitiveHeaderNames: [String] = [],

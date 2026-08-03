@@ -31,7 +31,7 @@ All parameters are optional:
 Tokiwatari.configure(
     session: TokiwatariLogSession(),                  // session provider (see below)
     allowedQueryParameters: ["page"],                 // URL query values to keep as-is
-    retentionSessions: 10,                            // keep the newest N sessions
+    retentionSessions: 5,                             // keep the newest N sessions
     maximumMainDatabaseSizeBytes: 128 * 1024 * 1024,  // main DB page-count cap
     maximumRetainedWALSizeBytes: 16 * 1024 * 1024,    // WAL size target
     additionalSensitiveHeaderNames: ["X-Tea-Secret"],
