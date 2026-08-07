@@ -8,4 +8,14 @@ updates:
       time: "08:00"
       timezone: "Asia/Tokyo"
     commit-message:
-      prefix: "chore"
+      prefix: "chore(deps)"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "saturday"
+      time: "08:00"
+      timezone: "Asia/Tokyo"
+    commit-message:
+      prefix: "ci(deps)"
