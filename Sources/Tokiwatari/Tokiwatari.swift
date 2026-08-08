@@ -88,11 +88,25 @@ public enum Tokiwatari {
     /// Parameters go through the same recursive key redaction as API bodies.
     /// `identifier` is NOT subject to redaction — never put secrets in it.
     public static func log(_ event: TokiwatariEvent) {
-        guard let snapshot = nextEventDispatchSnapshot() else { return }
+        let signposterCanEmit = currentSignpostEmitter()?.isEnabled ?? false
+        guard let snapshot = nextEventDispatchSnapshot(signposterCanEmit: signposterCanEmit) else {
+            return
+        }
         let identifier = StringSanitizer.sanitized(
             event.identifier,
             maximumBytes: SanitizationLimits.identifierByteLimit
         )
+        if let emitter = snapshot.signpostEmitter {
+            emitSignpost(
+                kind: .ui,
+                message: SignpostMetadataCodec.encodedUIMetadata(
+                    sessionId: snapshot.sessionId,
+                    sessionSequence: snapshot.sessionSequence,
+                    identifier: identifier
+                ),
+                emitter: emitter
+            )
+        }
         guard snapshot.outputs.contains(.storage),
               let database = snapshot.database,
               let context = snapshot.sanitizationContext
@@ -135,7 +149,28 @@ public enum Tokiwatari {
         start: Date,
         end: Date
     ) {
-        guard let snapshot = nextEventDispatchSnapshot() else { return }
+        let signposterCanEmit = currentSignpostEmitter()?.isEnabled ?? false
+        guard let snapshot = nextEventDispatchSnapshot(signposterCanEmit: signposterCanEmit) else {
+            return
+        }
+        if let emitter = snapshot.signpostEmitter {
+            emitSignpost(
+                kind: .api,
+                message: SignpostMetadataCodec.encodedAPIMetadata(
+                    sessionId: snapshot.sessionId,
+                    sessionSequence: snapshot.sessionSequence,
+                    method: request.httpMethod.map {
+                        StringSanitizer.sanitized($0, maximumBytes: SanitizationLimits.httpMethodByteLimit)
+                    },
+                    status: response?.statusCode,
+                    durationMs: clampedDurationMilliseconds(start: start, end: end),
+                    identifier: identifier.map {
+                        StringSanitizer.sanitized($0, maximumBytes: SanitizationLimits.identifierByteLimit)
+                    }
+                ),
+                emitter: emitter
+            )
+        }
         guard snapshot.outputs.contains(.storage),
               let database = snapshot.database,
               let context = snapshot.sanitizationContext
@@ -171,12 +206,13 @@ public enum Tokiwatari {
 
     // MARK: - Internal
 
-    /// Invariants after every publish: `outputs.contains(.storage)` ⇔
-    /// `database != nil`, `outputs.isEmpty` ⇔ `session == nil`.
+    // Active state contains a session and the resource for each enabled output:
+    // a database for `.storage` and an emitter for `.signposts`.
     private struct GlobalState {
         var session: (any TokiwatariSessionProviding)?
         var database: TokiwatariDatabase?
         var outputs: TokiwatariOutputs = []
+        var signpostEmitter: (any TokiwatariSignpostEmitting)?
         var assertsSessionValidity: Bool = true
         var sensitiveHeaderNames: Set<String> = Tokiwatari.defaultSensitiveHeaderNames
         var sensitiveBodyKeys: Set<String> = Tokiwatari.defaultSensitiveBodyKeys
@@ -204,14 +240,21 @@ public enum Tokiwatari {
         let outputs: TokiwatariOutputs
         let database: TokiwatariDatabase?
         let sanitizationContext: SanitizationContext?
+        let signpostEmitter: (any TokiwatariSignpostEmitting)?
     }
 
+    // `signposterCanEmit` is the caller's out-of-lock sample of `OSSignposter.isEnabled`.
     // `provider.next()` runs under the state lock and must not call back into Tokiwatari.
-    private static func nextEventDispatchSnapshot() -> EventDispatchSnapshot? {
+    private static func nextEventDispatchSnapshot(
+        signposterCanEmit: Bool
+    ) -> EventDispatchSnapshot? {
         state.withLock { s -> EventDispatchSnapshot? in
             var sinks: TokiwatariOutputs = []
             if s.outputs.contains(.storage), s.database != nil {
                 sinks.insert(.storage)
+            }
+            if s.outputs.contains(.signposts), s.signpostEmitter != nil, signposterCanEmit {
+                sinks.insert(.signposts)
             }
             guard !sinks.isEmpty, let provider = s.session else { return nil }
             let (sessionId, sequence) = provider.next()
@@ -254,9 +297,28 @@ public enum Tokiwatari {
                         allowedQueryParameters: s.allowedQueryParameters,
                         maximumPayloadBytes: s.maximumPayloadBytes
                     )
-                    : nil
+                    : nil,
+                signpostEmitter: sinks.contains(.signposts) ? s.signpostEmitter : nil
             )
         }
+    }
+
+    private static let defaultSignpostEmitter = TokiwatariSignposter()
+
+    private static func currentSignpostEmitter() -> (any TokiwatariSignpostEmitting)? {
+        state.withLock { $0.signpostEmitter }
+    }
+
+    private static func emitSignpost(
+        kind: TokiwatariSignpostEventKind,
+        message: String?,
+        emitter: any TokiwatariSignpostEmitting
+    ) {
+        guard let message else {
+            assertionFailure("Tokiwatari: signpost metadata fixed portion exceeded the byte budget")
+            return
+        }
+        emitter.emit(TokiwatariSignpostEvent(kind: kind, message: message))
     }
 
     private static let state = Mutex(GlobalState())
@@ -277,12 +339,14 @@ public enum Tokiwatari {
         maximumPayloadBytesForTesting: Int? = nil,
         assertingValidity: Bool = true,
         environmentForTesting: [String: String]? = nil,
+        signpostEmitterForTesting: (any TokiwatariSignpostEmitting)? = nil,
         databaseURL: URL?
     ) {
         state.withLock { s in
             s.session = nil
             s.database = nil
             s.outputs = []
+            s.signpostEmitter = nil
             s.lastSessionId = nil
             s.lastSequence = 0
         }
@@ -334,6 +398,9 @@ public enum Tokiwatari {
             s.session = active.isEmpty ? nil : session
             s.database = database
             s.outputs = active
+            s.signpostEmitter = active.contains(.signposts)
+                ? (signpostEmitterForTesting ?? defaultSignpostEmitter)
+                : nil
             s.assertsSessionValidity = assertingValidity
             s.sensitiveHeaderNames = defaultSensitiveHeaderNames.union(headerNames)
             s.sensitiveBodyKeys = defaultSensitiveBodyKeys.union(bodyKeys)
