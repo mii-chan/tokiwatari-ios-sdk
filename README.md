@@ -32,6 +32,7 @@ All parameters are optional:
 ```swift
 Tokiwatari.configure(
     session: TokiwatariLogSession(),                  // session provider (see below)
+    outputs: [.storage],                              // event destinations (see Instruments signposts)
     allowedQueryParameters: ["page"],                 // URL query values to keep as-is
     retentionSessions: 5,                             // keep the newest N sessions
     maximumMainDatabaseSizeBytes: 128 * 1024 * 1024,  // main DB page-count cap
@@ -43,7 +44,9 @@ Tokiwatari.configure(
 
 Never allowlist authentication or signature query parameters. `maximumMainDatabaseSizeBytes` caps the main SQLite file's page count — it is not a hard cap on total disk usage (WAL/SHM/temporary files and exports are not included).
 
-`configure` never throws. If storage cannot be opened or any `additionalSensitive*` entry is invalid — empty, longer than 256 UTF-8 bytes, or more than 256 distinct entries per list after normalization — the whole call fails: the SDK stays inactive (`Tokiwatari.isActive == false`), events are dropped, a console diagnostic is printed and a DEBUG assertion is raised. Failing beats silently weakening redaction. Invalid `allowedQueryParameters` entries are merely dropped, since that direction only increases redaction.
+`configure` never throws. When `.storage` is requested, failure to open storage or an invalid `additionalSensitive*` entry — empty, longer than 256 UTF-8 bytes, or more than 256 distinct entries per list after normalization — fails the whole call, `.signposts` included: the SDK stays inactive (`Tokiwatari.isActive == false`), events are dropped, a console diagnostic is printed and a DEBUG assertion is raised. Failing beats silently weakening redaction. Invalid `allowedQueryParameters` entries are merely dropped, since that direction only increases redaction.
+
+Storage-specific parameters (`allowedQueryParameters`, retention and size limits, `additionalSensitive*`) are used and validated only when `.storage` is requested — this asymmetry is intentional: the same invalid entry that fails a storage-requesting configure is ignored by a signposts-only one, which never opens the database.
 
 Tokiwatari does **not** disable itself in Release builds: recording behaves identically in every build configuration, so a Release-optimized Profile build can be instrumented. If Tokiwatari must not be present in your production artifact, exclude the dependency from the production target / project / package graph on the integration side — redaction and storage bounds are always active, but only dependency-level exclusion guarantees a production build contains no logging machinery.
 
@@ -143,11 +146,27 @@ Parameters get the same recursive key redaction as API bodies. `identifier` is t
 
 Modules that only define events can depend on the dependency-free `TokiwatariTracking` product alone (`import TokiwatariTracking`) instead of the full SDK.
 
+## Instruments signposts
+
+Tokiwatari can mirror every UI/API event as an `os_signpost` event marker (subsystem `com.tokiwatari`, category `events`, signpost names `TokiwatariUI` / `TokiwatariAPI`), adding anchors to an Instruments trace that correlate with the SQLite timeline through `(session_id, session_sequence)`:
+
+```swift
+Tokiwatari.configure(outputs: [.storage, .signposts])
+```
+
+For source-change-free measurement, keep the default `[.storage]` in code and set `TOKIWATARI_SIGNPOSTS=1` in the app's launch environment. Only the exact value `1` enables signposts. The variable is read once per `configure` in every build configuration, including a Release-optimized Profile build. The override only *adds* `.signposts`; it never removes an output. Add the `os_signposts` instrument to your Instruments template to record the custom category.
+
+Signpost metadata carries only bounded fields: `session_id`, `session_sequence`, the normalized and length-bounded identifier, and for API events the HTTP method, status code and `duration_ms`. Identifiers are not redacted. URLs, query parameters, headers, bodies, UI parameters and error details are never emitted. The API signpost is a completion event: its trace position is where `logAPIEvent` ran, while `duration_ms` is the transfer time computed from `start`/`end`.
+
+**Recorded signposts expose session IDs and identifiers as public metadata in Instruments trace artifacts** — `.trace` files persist outside the SQLite database and its protections. Never include secrets or personal data in identifiers. Custom session IDs must be non-sensitive opaque identifiers of at most 128 UTF-8 bytes; violating IDs raise a DEBUG assertion and drop the event from every output.
+
+`Tokiwatari.activeOutputs` reports the outputs active after the runtime override and initialization; `isActive` reports whether the SDK has any active output. Emission is additionally gated on `OSSignposter.isEnabled` as an opportunistic fast path. If the signposter cannot emit and `.storage` is also inactive, the event is skipped without consuming a sequence number.
+
 ## Sessions
 
 Events are ordered by a per-session, strictly monotonic sequence — never by wall-clock time. The default `TokiwatariLogSession` starts a new session at app launch and after 30 minutes of inactivity when returning to the foreground.
 
-For custom boundaries (e.g. login-based sessions), implement `TokiwatariSessionProviding` and pass it to `configure`. Implementations must be thread-safe, return strictly increasing sequences within a session, and be shared by all loggers — the SDK asserts monotonicity in DEBUG.
+For custom boundaries (e.g. login-based sessions), implement `TokiwatariSessionProviding` and pass it to `configure`. Implementations must be thread-safe, return strictly increasing sequences within a session, and be shared by all loggers — the SDK asserts monotonicity in DEBUG. Session IDs must be nonempty, non-sensitive opaque identifiers of at most 128 UTF-8 bytes (see Instruments signposts).
 
 ## Exporting from a physical device
 
@@ -159,7 +178,9 @@ let url = try Tokiwatari.exportSnapshot()   // consistent single-file copy (VACU
 // then read it with: tokiwatari --db <path>
 ```
 
-Exports land in `tmp/TokiwatariExports/tokiwatari-<UUID>.sqlite`. Files older than 24 hours are deleted best-effort at the next cleanup opportunity — the next `configure`, export, periodic maintenance pass, or background transition. There is no strict TTL while the app is suspended; iOS may also clear `tmp/` on its own.
+`exportSnapshot` throws `ExportError.storageNotActive` when the `.storage` output is not active (unconfigured, signposts-only, or failed initialization).
+
+Exports land in `tmp/TokiwatariExports/tokiwatari-<UUID>.sqlite`. Files older than 24 hours are deleted best-effort at the next cleanup opportunity — the next storage-requesting `configure`, export, or, while `.storage` is active, periodic maintenance pass or background transition. A signposts-only process never touches export files. There is no strict TTL while the app is suspended; iOS may also clear `tmp/` on its own.
 
 ## Storage details
 

@@ -72,22 +72,46 @@ final class CountingSession: TokiwatariSessionProviding {
     var currentId: String { state.withLock { $0.id } }
 }
 
+final class FakeSignpostEmitter: TokiwatariSignpostEmitting {
+    private let state: Mutex<(enabled: Bool, events: [TokiwatariSignpostEvent])>
+
+    init(enabled: Bool = true) {
+        state = Mutex((enabled, []))
+    }
+
+    var isEnabled: Bool { state.withLock { $0.enabled } }
+
+    func setEnabled(_ value: Bool) {
+        state.withLock { $0.enabled = value }
+    }
+
+    func emit(_ event: TokiwatariSignpostEvent) {
+        state.withLock { $0.events.append(event) }
+    }
+
+    var events: [TokiwatariSignpostEvent] { state.withLock { $0.events } }
+}
+
 /// Configures the SDK against a temporary database, runs `body`, flushes the
 /// writer queue and returns all recorded events in insertion order.
 func recordedEvents(
+    outputs: TokiwatariOutputs = [.storage],
     allowedQueryParameters: [String] = [],
     additionalSensitiveHeaderNames: [String] = [],
     additionalSensitiveBodyKeys: [String] = [],
     maximumPayloadBytesForTesting: Int? = nil,
+    signpostEmitter: FakeSignpostEmitter? = nil,
     _ body: () throws -> Void
 ) throws -> [RecordedEvent] {
     try tokiwatariGlobalStateLock.withLock { _ in
         Tokiwatari.configure(
             session: CountingSession(),
+            outputs: outputs,
             allowedQueryParameters: allowedQueryParameters,
             additionalSensitiveHeaderNames: additionalSensitiveHeaderNames,
             additionalSensitiveBodyKeys: additionalSensitiveBodyKeys,
             maximumPayloadBytesForTesting: maximumPayloadBytesForTesting,
+            signpostEmitterForTesting: signpostEmitter,
             databaseURL: makeTemporaryDatabaseURL()
         )
         guard let database = Tokiwatari.databaseForTesting else {
