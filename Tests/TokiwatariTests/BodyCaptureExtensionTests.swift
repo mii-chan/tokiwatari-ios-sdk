@@ -1,4 +1,3 @@
-#if DEBUG
 import Foundation
 import Testing
 @testable import Tokiwatari
@@ -39,4 +38,3 @@ import Testing
         #expect(event["request", "body", "password"] as? String == "<redacted>")
     }
 }
-#endif

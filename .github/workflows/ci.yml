@@ -26,7 +26,7 @@ jobs:
           restore-keys: spm-${{ runner.os }}-
       - name: Run tests
         run: swift test
-      - name: Run release contract tests
+      - name: Run tests (release)
         run: swift test -c release
 
   test-ios:

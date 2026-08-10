@@ -1,4 +1,3 @@
-#if DEBUG
 import Foundation
 import GRDB
 
@@ -32,4 +31,3 @@ struct EventRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         case payloadJson = "payload_json"
     }
 }
-#endif

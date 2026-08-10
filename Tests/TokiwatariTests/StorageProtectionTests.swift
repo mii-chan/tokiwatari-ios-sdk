@@ -1,4 +1,3 @@
-#if DEBUG
 import Foundation
 import Testing
 @testable import Tokiwatari
@@ -150,4 +149,3 @@ import Testing
     }
     #endif
 }
-#endif

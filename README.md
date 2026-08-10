@@ -4,6 +4,8 @@ Record an iOS app's UI events and API traffic into a single SQLite timeline, sea
 
 **Only the traffic you explicitly wire is recorded.** There is no automatic capture: you call `Tokiwatari.logAPIEvent` from your own network layer, and requests you don't wire never appear in the log.
 
+Tokiwatari **stays active in Release builds** — recording is build-configuration agnostic. To keep it out of a production artifact, exclude the dependency on the integration side (see Setup).
+
 ## Requirements
 
 - iOS 17+ / macOS 14+
@@ -43,7 +45,7 @@ Never allowlist authentication or signature query parameters. `maximumMainDataba
 
 `configure` never throws. If storage cannot be opened or any `additionalSensitive*` entry is invalid — empty, longer than 256 UTF-8 bytes, or more than 256 distinct entries per list after normalization — the whole call fails: the SDK stays inactive (`Tokiwatari.isActive == false`), events are dropped, a console diagnostic is printed and a DEBUG assertion is raised. Failing beats silently weakening redaction. Invalid `allowedQueryParameters` entries are merely dropped, since that direction only increases redaction.
 
-Logging is compiled in only when this package is built with DEBUG; otherwise every public call is a no-op with no side effects — no files, timers or observers are created, `configure` prints a warning, and `Tokiwatari.isActive` stays `false`.
+Tokiwatari does **not** disable itself in Release builds: recording behaves identically in every build configuration, so a Release-optimized Profile build can be instrumented. If Tokiwatari must not be present in your production artifact, exclude the dependency from the production target / project / package graph on the integration side — redaction and storage bounds are always active, but only dependency-level exclusion guarantees a production build contains no logging machinery.
 
 ## Recording API traffic
 
@@ -127,7 +129,7 @@ struct TeaTappedEvent {
 
 func track(_ event: TeaTappedEvent) {
     // ... your real analytics send goes here ...
-    Tokiwatari.log(event.tokiwatariEvent)   // no-op in Release
+    Tokiwatari.log(event.tokiwatariEvent)
 }
 ```
 
@@ -172,7 +174,7 @@ Exports land in `tmp/TokiwatariExports/tokiwatari-<UUID>.sqlite`. Files older th
 
 ```bash
 swift build && swift test                         # runs on a macOS host
-swift build -c release && swift test -c release   # verifies the Release no-op contract
+swift build -c release && swift test -c release   # same tests against the optimized build
 ```
 
 ## License

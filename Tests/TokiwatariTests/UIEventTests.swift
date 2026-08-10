@@ -1,4 +1,3 @@
-#if DEBUG
 import Foundation
 import Testing
 @testable import Tokiwatari
@@ -63,4 +62,3 @@ import Testing
         #expect(identifier.hasSuffix("<truncated>"))
     }
 }
-#endif

@@ -4,18 +4,14 @@ import UIKit
 #endif
 
 /// Tokiwatari debug logging SDK entry point.
-///
-/// All logging machinery is compiled only in DEBUG builds. In Release the public
-/// API still exists (so app code compiles unchanged) but every call is a no-op.
 public enum Tokiwatari {
 
     public enum ExportError: Error {
         /// `configure` has not been called (or opening the database failed).
         case notConfigured
-        case unavailableInRelease
     }
 
-    // MARK: - Public API (exists in all configurations)
+    // MARK: - Public API
 
     /// Default value of `configure`'s `retentionSessions` parameter.
     public static let defaultRetentionSessions: Int = 5
@@ -56,7 +52,6 @@ public enum Tokiwatari {
         additionalSensitiveHeaderNames: [String] = [],
         additionalSensitiveBodyKeys: [String] = []
     ) {
-        #if DEBUG
         configure(
             session: session,
             allowedQueryParameters: allowedQueryParameters,
@@ -67,22 +62,11 @@ public enum Tokiwatari {
             additionalSensitiveBodyKeys: additionalSensitiveBodyKeys,
             databaseURL: nil
         )
-        #else
-        print(
-            "Tokiwatari: configure() called but logging is compiled out — this package "
-                + "was built without DEBUG. Custom build configurations build Swift "
-                + "packages in release; all Tokiwatari calls are no-ops."
-        )
-        #endif
     }
 
-    /// True when logging is compiled in (DEBUG package build) and `configure` has opened the database.
+    /// True when `configure` has opened the database.
     public static var isActive: Bool {
-        #if DEBUG
         isConfigured
-        #else
-        false
-        #endif
     }
 
     /// Records a UI event on the debug timeline
@@ -91,7 +75,6 @@ public enum Tokiwatari {
     /// Parameters go through the same recursive key redaction as API bodies.
     /// `identifier` is NOT subject to redaction — never put secrets in it.
     public static func log(_ event: TokiwatariEvent) {
-        #if DEBUG
         guard let snapshot = nextEventDispatchSnapshot() else { return }
         let payloadJson = sanitizedUIPayloadJSON(
             event.parameters,
@@ -113,7 +96,6 @@ public enum Tokiwatari {
             payloadJson: payloadJson
         )
         snapshot.database.insertAsync(record)
-        #endif
     }
 
     /// Convenience overload of `log(_:)` for one-off events.
@@ -138,7 +120,6 @@ public enum Tokiwatari {
         start: Date,
         end: Date
     ) {
-        #if DEBUG
         guard let snapshot = nextEventDispatchSnapshot() else { return }
         var record = sanitizedAPIEventRecord(
             identifier: identifier,
@@ -153,26 +134,20 @@ public enum Tokiwatari {
         record.sessionId = snapshot.sessionId
         record.sessionSequence = snapshot.sessionSequence
         snapshot.database.insertAsync(record)
-        #endif
     }
 
     /// Exports a consistent single-file snapshot of the debug database
     /// (`VACUUM INTO`, no `-wal`/`-shm` sidecars) into the temporary directory
     /// and returns its file URL. Read it with `tokiwatari --db <path>`.
     public static func exportSnapshot() throws -> URL {
-        #if DEBUG
         guard let database = state.withLock({ $0.database }) else {
             throw ExportError.notConfigured
         }
         return try database.exportSnapshot()
-        #else
-        throw ExportError.unavailableInRelease
-        #endif
     }
 
-    // MARK: - Internal (DEBUG only)
+    // MARK: - Internal
 
-    #if DEBUG
     private struct GlobalState {
         var session: (any TokiwatariSessionProviding)?
         var database: TokiwatariDatabase?
@@ -630,5 +605,4 @@ public enum Tokiwatari {
             return dropped
         }
     }
-    #endif
 }

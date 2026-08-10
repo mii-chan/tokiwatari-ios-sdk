@@ -1,4 +1,3 @@
-#if DEBUG
 import Foundation
 import Testing
 @testable import Tokiwatari
@@ -466,4 +465,3 @@ import Testing
         #expect(events[0].sessionId == events[1].sessionId)
     }
 }
-#endif

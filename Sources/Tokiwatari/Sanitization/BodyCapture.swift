@@ -1,4 +1,3 @@
-#if DEBUG
 import Foundation
 
 /// Allowlist-based body capture. Invariant: oversized, unknown-format or
@@ -161,4 +160,3 @@ enum BodyCapture {
         return omitQuery(object)
     }
 }
-#endif

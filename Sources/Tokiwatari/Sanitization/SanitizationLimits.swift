@@ -1,4 +1,3 @@
-#if DEBUG
 import Foundation
 
 /// Byte/count bounds applied to every stored string, JSON structure and final
@@ -42,4 +41,3 @@ enum SanitizationMarkers {
     static let omitted = "<omitted>"
     static let customErrorDomain = "<custom-error-domain>"
 }
-#endif

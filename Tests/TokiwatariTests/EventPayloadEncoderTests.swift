@@ -1,4 +1,3 @@
-#if DEBUG
 import Foundation
 import Testing
 @testable import Tokiwatari
@@ -68,4 +67,3 @@ import Testing
         #expect(object.count == 2)
     }
 }
-#endif

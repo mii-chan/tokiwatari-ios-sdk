@@ -1,4 +1,3 @@
-#if DEBUG
 import Foundation
 import GRDB
 import Testing
@@ -276,4 +275,3 @@ import Testing
         #expect(newestOldRowSurvives == 1)
     }
 }
-#endif

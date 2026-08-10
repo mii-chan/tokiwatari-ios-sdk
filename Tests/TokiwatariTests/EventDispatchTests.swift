@@ -1,4 +1,3 @@
-#if DEBUG
 import Foundation
 import GRDB
 import Testing
@@ -114,4 +113,3 @@ import Testing
         }
     }
 }
-#endif

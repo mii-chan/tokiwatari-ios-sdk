@@ -1,4 +1,3 @@
-#if DEBUG
 import Foundation
 
 /// Rebuilds URLs for storage: strips userinfo and fragment, and redacts every
@@ -27,4 +26,3 @@ enum URLSanitizer {
         return StringSanitizer.sanitized(rebuilt, maximumBytes: SanitizationLimits.sanitizedURLByteLimit)
     }
 }
-#endif

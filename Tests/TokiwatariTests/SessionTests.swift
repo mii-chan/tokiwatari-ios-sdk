@@ -1,4 +1,3 @@
-#if DEBUG
 import Foundation
 import Testing
 @testable import Tokiwatari
@@ -72,4 +71,3 @@ import Testing
         #expect(session.next().sequence == 1)
     }
 }
-#endif
