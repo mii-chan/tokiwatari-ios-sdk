@@ -39,36 +39,49 @@ import Testing
     @Test func concurrentReconfigureNeverMixesSessionsAcrossDatabases() throws {
         try tokiwatariGlobalStateLock.withLock { _ in
             let urls = (0..<4).map { _ in makeTemporaryDatabaseURL() }
-            let done = Mutex(false)
             let loggerCount = 2
+            // Split bounded logger bursts across reconfiguration boundaries.
+            let logsPerGeneration = 8
+            let startGeneration = (0..<loggerCount).map { _ in DispatchSemaphore(value: 0) }
+            let continueGeneration = (0..<loggerCount).map { _ in DispatchSemaphore(value: 0) }
+            let generationStarted = DispatchSemaphore(value: 0)
             let finished = DispatchSemaphore(value: 0)
-            for _ in 0..<loggerCount {
-                DispatchQueue.global().async {
-                    while !done.withLock({ $0 }) {
+            for logger in 0..<loggerCount {
+                Thread.detachNewThread {
+                    for _ in urls.indices {
+                        startGeneration[logger].wait()
                         Tokiwatari.log(identifier: "spin", parameters: ["k": "v"])
+                        generationStarted.signal()
+                        continueGeneration[logger].wait()
+                        for _ in 1..<logsPerGeneration {
+                            Tokiwatari.log(identifier: "spin", parameters: ["k": "v"])
+                        }
                     }
                     finished.signal()
                 }
             }
+            var databases: [TokiwatariDatabase] = []
             for (index, url) in urls.enumerated() {
                 Tokiwatari.configure(session: CountingSession(id: "gen-\(index)"), databaseURL: url)
-                for _ in 0..<100 {
-                    Tokiwatari.logAPIEvent(request: makeRequest(), start: Date(), end: Date())
-                }
+                databases.append(try #require(Tokiwatari.databaseForTesting))
+                for gate in startGeneration { gate.signal() }
+                for _ in 0..<loggerCount { generationStarted.wait() }
+                for gate in continueGeneration { gate.signal() }
             }
-            done.withLock { $0 = true }
             for _ in 0..<loggerCount { finished.wait() }
-            try Tokiwatari.databaseForTesting?.flushPendingWrites()
+            for database in databases { try database.flushPendingWrites() }
 
             for (index, url) in urls.enumerated() {
-                let sessionIds = try read(url) { db in
-                    try String.fetchAll(db, sql: "SELECT DISTINCT session_id FROM events")
+                let (sessionIds, spinEvents) = try read(url) { db in
+                    (try String.fetchAll(db, sql: "SELECT DISTINCT session_id FROM events"),
+                     try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM events WHERE identifier = 'spin'") ?? 0)
                 }
                 #expect(!sessionIds.isEmpty)
                 #expect(
                     sessionIds.allSatisfy { $0 == "gen-\(index)" },
                     "database \(index) contains sessions \(sessionIds)"
                 )
+                #expect(spinEvents > 0, "database \(index) contains no concurrent logger events")
             }
         }
     }
