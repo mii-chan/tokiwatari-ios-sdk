@@ -118,6 +118,8 @@ import Testing
 
     @Test func periodicMaintenanceRemovesExpiredExports() throws {
         try tokiwatariGlobalStateLock.withLock { _ in
+            Tokiwatari.configure(session: CountingSession(), databaseURL: makeTemporaryDatabaseURL())
+
             let directory = TokiwatariDatabase.exportDirectoryURL()
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let expired = directory.appendingPathComponent("tokiwatari-\(UUID().uuidString).sqlite")
@@ -130,8 +132,6 @@ import Testing
                 ofItemAtPath: expired.path
             )
 
-            // Expired exports must disappear on the maintenance tick alone,
-            // without a configure or export call.
             Tokiwatari.performDatabaseMaintenance()
 
             #expect(!FileManager.default.fileExists(atPath: expired.path))

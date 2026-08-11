@@ -92,12 +92,14 @@ public enum Tokiwatari {
     /// `identifier` is NOT subject to redaction — never put secrets in it.
     public static func log(_ event: TokiwatariEvent) {
         #if DEBUG
-        guard let context = sanitizationContext() else { return }
-        let payloadJson = sanitizedUIPayloadJSON(event.parameters, sanitizer: context.sanitizer)
-        guard let slot = nextEventSlot() else { return }
+        guard let snapshot = nextEventDispatchSnapshot() else { return }
+        let payloadJson = sanitizedUIPayloadJSON(
+            event.parameters,
+            sanitizer: snapshot.sanitizationContext.sanitizer
+        )
         let record = EventRecord(
-            sessionId: slot.sessionId,
-            sessionSequence: slot.sequence,
+            sessionId: snapshot.sessionId,
+            sessionSequence: snapshot.sessionSequence,
             timestamp: Date(),
             eventKind: "ui",
             identifier: StringSanitizer.sanitized(
@@ -110,7 +112,7 @@ public enum Tokiwatari {
             durationMs: nil,
             payloadJson: payloadJson
         )
-        slot.database.insertAsync(record)
+        snapshot.database.insertAsync(record)
         #endif
     }
 
@@ -137,7 +139,7 @@ public enum Tokiwatari {
         end: Date
     ) {
         #if DEBUG
-        guard let context = sanitizationContext() else { return }
+        guard let snapshot = nextEventDispatchSnapshot() else { return }
         var record = sanitizedAPIEventRecord(
             identifier: identifier,
             request: request,
@@ -146,12 +148,11 @@ public enum Tokiwatari {
             error: error,
             start: start,
             end: end,
-            context: context
+            context: snapshot.sanitizationContext
         )
-        guard let slot = nextEventSlot() else { return }
-        record.sessionId = slot.sessionId
-        record.sessionSequence = slot.sequence
-        slot.database.insertAsync(record)
+        record.sessionId = snapshot.sessionId
+        record.sessionSequence = snapshot.sessionSequence
+        snapshot.database.insertAsync(record)
         #endif
     }
 
@@ -180,7 +181,6 @@ public enum Tokiwatari {
         var allowedQueryParameters: Set<String> = []
         var maximumPayloadBytes: Int = SanitizationLimits.maximumPayloadBytes
         var retentionSessions: Int = Tokiwatari.defaultRetentionSessions
-        // Watermark for the sequence-monotonicity assertion in nextEventSlot().
         var lastSessionId: String?
         var lastSequence: Int64 = 0
     }
@@ -196,20 +196,46 @@ public enum Tokiwatari {
         }
     }
 
-    private static func sanitizationContext() -> SanitizationContext? {
-        state.withLock { s in
-            guard s.database != nil, s.session != nil else { return nil }
-            return SanitizationContext(
-                sensitiveHeaderNames: s.sensitiveHeaderNames,
-                sensitiveBodyKeys: s.sensitiveBodyKeys,
-                allowedQueryParameters: s.allowedQueryParameters,
-                maximumPayloadBytes: s.maximumPayloadBytes
+    private struct EventDispatchSnapshot {
+        let sessionId: String
+        let sessionSequence: Int64
+        let database: TokiwatariDatabase
+        let sanitizationContext: SanitizationContext
+    }
+
+    // `provider.next()` runs under the state lock and must not call back into Tokiwatari.
+    private static func nextEventDispatchSnapshot() -> EventDispatchSnapshot? {
+        state.withLock { s -> EventDispatchSnapshot? in
+            guard let provider = s.session, let database = s.database else { return nil }
+            let (sessionId, sequence) = provider.next()
+            if s.lastSessionId == sessionId {
+                assert(
+                    sequence > s.lastSequence,
+                    """
+                    Tokiwatari: TokiwatariSessionProviding must return strictly \
+                    increasing sequences within a session \
+                    (got \(sequence) after \(s.lastSequence) for session \(sessionId)).
+                    """
+                )
+            }
+            s.lastSessionId = sessionId
+            s.lastSequence = sequence
+            return EventDispatchSnapshot(
+                sessionId: sessionId,
+                sessionSequence: sequence,
+                database: database,
+                sanitizationContext: SanitizationContext(
+                    sensitiveHeaderNames: s.sensitiveHeaderNames,
+                    sensitiveBodyKeys: s.sensitiveBodyKeys,
+                    allowedQueryParameters: s.allowedQueryParameters,
+                    maximumPayloadBytes: s.maximumPayloadBytes
+                )
             )
         }
     }
 
     private static let state = Mutex(GlobalState())
-    private static let bootstrapped = Mutex(false)
+    static let storageMaintenanceStarted = Mutex(false)
     private static let checkpointTimer = Mutex<(any DispatchSourceTimer)?>(nil)
     private static let checkpointInterval: TimeInterval = 30
 
@@ -282,7 +308,9 @@ public enum Tokiwatari {
                 assertionFailure("Tokiwatari: configure failed — logging is disabled: \(failure)")
             }
         }
-        bootstrapIfNeeded()
+        if database != nil {
+            startStorageMaintenanceIfNeeded()
+        }
     }
 
     /// Invalid allowlist entries are dropped, which only increases redaction.
@@ -353,14 +381,21 @@ public enum Tokiwatari {
         return result
     }
 
-    private static func bootstrapIfNeeded() {
-        let isFirst = bootstrapped.withLock { flag -> Bool in
+    private static func startStorageMaintenanceIfNeeded() {
+        startStorageMaintenanceIfNeeded(startInfrastructure: startMaintenanceInfrastructure)
+    }
+
+    static func startStorageMaintenanceIfNeeded(startInfrastructure: () -> Void) {
+        let isFirst = storageMaintenanceStarted.withLock { flag -> Bool in
             if flag { return false }
             flag = true
             return true
         }
         guard isFirst else { return }
+        startInfrastructure()
+    }
 
+    private static func startMaintenanceInfrastructure() {
         // Periodic export, retention and WAL maintenance.
         let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
         timer.schedule(deadline: .now() + checkpointInterval, repeating: checkpointInterval)
@@ -375,23 +410,25 @@ public enum Tokiwatari {
             object: nil,
             queue: nil
         ) { _ in
-            Tokiwatari.checkpointDatabase()
-            TokiwatariDatabase.cleanUpExpiredExports()
+            Tokiwatari.performBackgroundCheckpoint()
         }
         #endif
     }
 
     static func performDatabaseMaintenance() {
-        TokiwatariDatabase.cleanUpExpiredExports()
         let (database, retained) = state.withLock { ($0.database, $0.retentionSessions) }
-        database?.performMaintenance(retainingSessions: retained)
+        guard let database else { return }
+        TokiwatariDatabase.cleanUpExpiredExports()
+        database.performMaintenance(retainingSessions: retained)
     }
 
     /// Background transition: best-effort TRUNCATE so a device pull sees a
     /// minimal WAL.
-    static func checkpointDatabase() {
+    static func performBackgroundCheckpoint() {
         let database = state.withLock { $0.database }
-        database?.checkpointTruncate()
+        guard let database else { return }
+        database.checkpointTruncate()
+        TokiwatariDatabase.cleanUpExpiredExports()
     }
 
     static var isConfigured: Bool {
@@ -400,30 +437,6 @@ public enum Tokiwatari {
 
     static var databaseForTesting: TokiwatariDatabase? {
         state.withLock { $0.database }
-    }
-
-    /// Atomically obtains the next (sessionId, sequence) pair and verifies the
-    /// monotonicity contract under the same lock, so concurrent callers cannot
-    /// produce false-positive assertion failures. `provider.next()` runs while
-    /// holding the SDK lock — it must not call back into Tokiwatari.
-    private static func nextEventSlot() -> (sessionId: String, sequence: Int64, database: TokiwatariDatabase)? {
-        state.withLock { s -> (sessionId: String, sequence: Int64, database: TokiwatariDatabase)? in
-            guard let provider = s.session, let database = s.database else { return nil }
-            let (sessionId, sequence) = provider.next()
-            if s.lastSessionId == sessionId {
-                assert(
-                    sequence > s.lastSequence,
-                    """
-                    Tokiwatari: TokiwatariSessionProviding must return strictly \
-                    increasing sequences within a session \
-                    (got \(sequence) after \(s.lastSequence) for session \(sessionId)).
-                    """
-                )
-            }
-            s.lastSessionId = sessionId
-            s.lastSequence = sequence
-            return (sessionId, sequence, database)
-        }
     }
 
     // MARK: API event recording

@@ -57,7 +57,11 @@ struct RecordedEvent {
 }
 
 final class CountingSession: TokiwatariSessionProviding {
-    private let state = Mutex<(id: String, sequence: Int64)>(("test-session", 0))
+    private let state: Mutex<(id: String, sequence: Int64)>
+
+    init(id: String = "test-session") {
+        state = Mutex((id, 0))
+    }
 
     func next() -> (sessionId: String, sequence: Int64) {
         state.withLock { s in
