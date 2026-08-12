@@ -1,4 +1,3 @@
-#if DEBUG
 import Foundation
 import GRDB
 @testable import Tokiwatari
@@ -149,4 +148,3 @@ func makeResponse(
         headerFields: headers
     )!
 }
-#endif

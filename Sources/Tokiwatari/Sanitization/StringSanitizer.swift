@@ -1,4 +1,3 @@
-#if DEBUG
 import Foundation
 
 /// Shared string bounding used by identifiers, URLs, headers and error
@@ -37,4 +36,3 @@ enum StringSanitizer {
         scalar.value < 0x20 || (0x7F...0x9F).contains(scalar.value)
     }
 }
-#endif

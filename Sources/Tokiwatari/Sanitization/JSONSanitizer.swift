@@ -1,4 +1,3 @@
-#if DEBUG
 import Foundation
 
 /// Shared JSON sanitizer for API bodies and UI parameters.
@@ -115,4 +114,3 @@ struct JSONSanitizer {
         }
     }
 }
-#endif

@@ -1,4 +1,3 @@
-#if DEBUG
 import Foundation
 
 /// Bounds and redacts HTTP header maps deterministically.
@@ -53,4 +52,3 @@ enum HeaderSanitizer {
         return result
     }
 }
-#endif

@@ -1,4 +1,3 @@
-#if DEBUG
 import Foundation
 import Testing
 @testable import Tokiwatari
@@ -59,4 +58,3 @@ import Testing
         #expect(event["request", "headers", "Accept"] as? String == "application/json")
     }
 }
-#endif

@@ -1,4 +1,3 @@
-#if DEBUG
 import Foundation
 import GRDB
 
@@ -434,4 +433,3 @@ final class TokiwatariDatabase: Sendable {
         try pool.write { _ in }
     }
 }
-#endif

@@ -1,4 +1,3 @@
-#if DEBUG
 import Foundation
 
 /// Assembles the final `payload_json` for API events.
@@ -82,4 +81,3 @@ enum EventPayloadEncoder {
         try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
     }
 }
-#endif

@@ -32,9 +32,7 @@ public final class TokiwatariLogSession: TokiwatariSessionProviding {
     public init(timeout: TimeInterval = 30 * 60) {
         self.timeout = timeout
         self.state = Mutex(State(id: UUID().uuidString, sequence: 0, lastActivity: Date()))
-        // DEBUG-only so that Release `configure()` (whose default argument
-        // constructs this) stays entirely side-effect free.
-        #if DEBUG && canImport(UIKit)
+        #if canImport(UIKit)
         foregroundObserver = NotificationCenter.default.addObserver(
             forName: UIApplication.willEnterForegroundNotification,
             object: nil,

@@ -1,4 +1,3 @@
-#if DEBUG
 import Foundation
 import GRDB
 import Testing
@@ -195,4 +194,3 @@ import Testing
         #expect(snapshot.version == 999)
     }
 }
-#endif
