@@ -6,9 +6,8 @@ import UIKit
 /// Tokiwatari debug logging SDK entry point.
 public enum Tokiwatari {
 
-    public enum ExportError: Error {
-        /// `configure` has not been called (or opening the database failed).
-        case notConfigured
+    public enum ExportError: Error, Sendable {
+        case storageNotActive
     }
 
     // MARK: - Public API
@@ -22,8 +21,15 @@ public enum Tokiwatari {
     /// assertion. Sensitive entries must be nonempty, at most 256 UTF-8 bytes,
     /// and at most 256 distinct normalized values per list.
     ///
+    /// Launching with `TOKIWATARI_SIGNPOSTS=1` adds `.signposts` to the
+    /// requested outputs. Signpost metadata (session IDs, sanitized
+    /// identifiers) is public in Instruments traces — never put secrets in it.
+    ///
     /// - Parameters:
-    ///   - session: session provider shared by the UI and API loggers.
+    ///   - session: session provider shared by the UI and API loggers. Session
+    ///     IDs must be nonempty, non-sensitive, and at most 128 UTF-8 bytes.
+    ///   - outputs: destinations to write events to; the storage-specific
+    ///     parameters below only apply when `.storage` is requested.
     ///   - allowedQueryParameters: query parameter names whose values are kept
     ///     in stored URLs; every other query value becomes `<redacted>`. Never
     ///     allow authentication or signature parameters. Do not put secrets in
@@ -45,6 +51,7 @@ public enum Tokiwatari {
     ///     `verificationCode`) here.
     public static func configure(
         session: any TokiwatariSessionProviding = TokiwatariLogSession(),
+        outputs: TokiwatariOutputs = [.storage],
         allowedQueryParameters: [String] = [],
         retentionSessions: Int = defaultRetentionSessions,
         maximumMainDatabaseSizeBytes: Int = 128 * 1024 * 1024,
@@ -54,6 +61,7 @@ public enum Tokiwatari {
     ) {
         configure(
             session: session,
+            outputs: outputs,
             allowedQueryParameters: allowedQueryParameters,
             retentionSessions: retentionSessions,
             maximumMainDatabaseSizeBytes: maximumMainDatabaseSizeBytes,
@@ -64,9 +72,14 @@ public enum Tokiwatari {
         )
     }
 
-    /// True when `configure` has opened the database.
+    /// Outputs active after runtime overrides and initialization; not a
+    /// recording guarantee.
+    public static var activeOutputs: TokiwatariOutputs {
+        state.withLock { $0.outputs }
+    }
+
     public static var isActive: Bool {
-        isConfigured
+        !activeOutputs.isEmpty
     }
 
     /// Records a UI event on the debug timeline
@@ -75,27 +88,43 @@ public enum Tokiwatari {
     /// Parameters go through the same recursive key redaction as API bodies.
     /// `identifier` is NOT subject to redaction — never put secrets in it.
     public static func log(_ event: TokiwatariEvent) {
-        guard let snapshot = nextEventDispatchSnapshot() else { return }
-        let payloadJson = sanitizedUIPayloadJSON(
-            event.parameters,
-            sanitizer: snapshot.sanitizationContext.sanitizer
+        let signposterCanEmit = currentSignpostEmitter()?.isEnabled ?? false
+        guard let snapshot = nextEventDispatchSnapshot(signposterCanEmit: signposterCanEmit) else {
+            return
+        }
+        let identifier = StringSanitizer.sanitized(
+            event.identifier,
+            maximumBytes: SanitizationLimits.identifierByteLimit
         )
+        if let emitter = snapshot.signpostEmitter {
+            emitSignpost(
+                kind: .ui,
+                message: SignpostMetadataCodec.encodedUIMetadata(
+                    sessionId: snapshot.sessionId,
+                    sessionSequence: snapshot.sessionSequence,
+                    identifier: identifier
+                ),
+                emitter: emitter
+            )
+        }
+        guard snapshot.outputs.contains(.storage),
+              let database = snapshot.database,
+              let context = snapshot.sanitizationContext
+        else { return }
+        let payloadJson = sanitizedUIPayloadJSON(event.parameters, sanitizer: context.sanitizer)
         let record = EventRecord(
             sessionId: snapshot.sessionId,
             sessionSequence: snapshot.sessionSequence,
             timestamp: Date(),
             eventKind: "ui",
-            identifier: StringSanitizer.sanitized(
-                event.identifier,
-                maximumBytes: SanitizationLimits.identifierByteLimit
-            ),
+            identifier: identifier,
             httpMethod: nil,
             url: nil,
             statusCode: nil,
             durationMs: nil,
             payloadJson: payloadJson
         )
-        snapshot.database.insertAsync(record)
+        database.insertAsync(record)
     }
 
     /// Convenience overload of `log(_:)` for one-off events.
@@ -120,7 +149,32 @@ public enum Tokiwatari {
         start: Date,
         end: Date
     ) {
-        guard let snapshot = nextEventDispatchSnapshot() else { return }
+        let signposterCanEmit = currentSignpostEmitter()?.isEnabled ?? false
+        guard let snapshot = nextEventDispatchSnapshot(signposterCanEmit: signposterCanEmit) else {
+            return
+        }
+        if let emitter = snapshot.signpostEmitter {
+            emitSignpost(
+                kind: .api,
+                message: SignpostMetadataCodec.encodedAPIMetadata(
+                    sessionId: snapshot.sessionId,
+                    sessionSequence: snapshot.sessionSequence,
+                    method: request.httpMethod.map {
+                        StringSanitizer.sanitized($0, maximumBytes: SanitizationLimits.httpMethodByteLimit)
+                    },
+                    status: response?.statusCode,
+                    durationMs: clampedDurationMilliseconds(start: start, end: end),
+                    identifier: identifier.map {
+                        StringSanitizer.sanitized($0, maximumBytes: SanitizationLimits.identifierByteLimit)
+                    }
+                ),
+                emitter: emitter
+            )
+        }
+        guard snapshot.outputs.contains(.storage),
+              let database = snapshot.database,
+              let context = snapshot.sanitizationContext
+        else { return }
         var record = sanitizedAPIEventRecord(
             identifier: identifier,
             request: request,
@@ -129,28 +183,37 @@ public enum Tokiwatari {
             error: error,
             start: start,
             end: end,
-            context: snapshot.sanitizationContext
+            context: context
         )
         record.sessionId = snapshot.sessionId
         record.sessionSequence = snapshot.sessionSequence
-        snapshot.database.insertAsync(record)
+        database.insertAsync(record)
     }
 
     /// Exports a consistent single-file snapshot of the debug database
     /// (`VACUUM INTO`, no `-wal`/`-shm` sidecars) into the temporary directory
-    /// and returns its file URL. Read it with `tokiwatari --db <path>`.
+    /// and returns its file URL. Requires an active `.storage` output.
+    /// Read it with `tokiwatari --db <path>`.
     public static func exportSnapshot() throws -> URL {
-        guard let database = state.withLock({ $0.database }) else {
-            throw ExportError.notConfigured
+        let database = try state.withLock { s -> TokiwatariDatabase in
+            guard s.outputs.contains(.storage), let database = s.database else {
+                throw ExportError.storageNotActive
+            }
+            return database
         }
         return try database.exportSnapshot()
     }
 
     // MARK: - Internal
 
+    // Active state contains a session and the resource for each enabled output:
+    // a database for `.storage` and an emitter for `.signposts`.
     private struct GlobalState {
         var session: (any TokiwatariSessionProviding)?
         var database: TokiwatariDatabase?
+        var outputs: TokiwatariOutputs = []
+        var signpostEmitter: (any TokiwatariSignpostEmitting)?
+        var assertsSessionValidity: Bool = true
         var sensitiveHeaderNames: Set<String> = Tokiwatari.defaultSensitiveHeaderNames
         var sensitiveBodyKeys: Set<String> = Tokiwatari.defaultSensitiveBodyKeys
         var allowedQueryParameters: Set<String> = []
@@ -174,15 +237,42 @@ public enum Tokiwatari {
     private struct EventDispatchSnapshot {
         let sessionId: String
         let sessionSequence: Int64
-        let database: TokiwatariDatabase
-        let sanitizationContext: SanitizationContext
+        let outputs: TokiwatariOutputs
+        let database: TokiwatariDatabase?
+        let sanitizationContext: SanitizationContext?
+        let signpostEmitter: (any TokiwatariSignpostEmitting)?
     }
 
+    // `signposterCanEmit` is the caller's out-of-lock sample of `OSSignposter.isEnabled`.
     // `provider.next()` runs under the state lock and must not call back into Tokiwatari.
-    private static func nextEventDispatchSnapshot() -> EventDispatchSnapshot? {
+    private static func nextEventDispatchSnapshot(
+        signposterCanEmit: Bool
+    ) -> EventDispatchSnapshot? {
         state.withLock { s -> EventDispatchSnapshot? in
-            guard let provider = s.session, let database = s.database else { return nil }
+            var sinks: TokiwatariOutputs = []
+            if s.outputs.contains(.storage), s.database != nil {
+                sinks.insert(.storage)
+            }
+            if s.outputs.contains(.signposts), s.signpostEmitter != nil, signposterCanEmit {
+                sinks.insert(.signposts)
+            }
+            guard !sinks.isEmpty, let provider = s.session else { return nil }
             let (sessionId, sequence) = provider.next()
+            guard !sessionId.isEmpty,
+                  sessionId.utf8.count <= SanitizationLimits.sessionIdByteLimit
+            else {
+                // Truncating would corrupt the correlation key; drop the event instead.
+                if s.assertsSessionValidity {
+                    assertionFailure(
+                        """
+                        Tokiwatari: session IDs must be nonempty, non-sensitive \
+                        opaque identifiers of at most \
+                        \(SanitizationLimits.sessionIdByteLimit) UTF-8 bytes.
+                        """
+                    )
+                }
+                return nil
+            }
             if s.lastSessionId == sessionId {
                 assert(
                     sequence > s.lastSequence,
@@ -198,15 +288,37 @@ public enum Tokiwatari {
             return EventDispatchSnapshot(
                 sessionId: sessionId,
                 sessionSequence: sequence,
-                database: database,
-                sanitizationContext: SanitizationContext(
-                    sensitiveHeaderNames: s.sensitiveHeaderNames,
-                    sensitiveBodyKeys: s.sensitiveBodyKeys,
-                    allowedQueryParameters: s.allowedQueryParameters,
-                    maximumPayloadBytes: s.maximumPayloadBytes
-                )
+                outputs: sinks,
+                database: sinks.contains(.storage) ? s.database : nil,
+                sanitizationContext: sinks.contains(.storage)
+                    ? SanitizationContext(
+                        sensitiveHeaderNames: s.sensitiveHeaderNames,
+                        sensitiveBodyKeys: s.sensitiveBodyKeys,
+                        allowedQueryParameters: s.allowedQueryParameters,
+                        maximumPayloadBytes: s.maximumPayloadBytes
+                    )
+                    : nil,
+                signpostEmitter: sinks.contains(.signposts) ? s.signpostEmitter : nil
             )
         }
+    }
+
+    private static let defaultSignpostEmitter = TokiwatariSignposter()
+
+    private static func currentSignpostEmitter() -> (any TokiwatariSignpostEmitting)? {
+        state.withLock { $0.signpostEmitter }
+    }
+
+    private static func emitSignpost(
+        kind: TokiwatariSignpostEventKind,
+        message: String?,
+        emitter: any TokiwatariSignpostEmitting
+    ) {
+        guard let message else {
+            assertionFailure("Tokiwatari: signpost metadata fixed portion exceeded the byte budget")
+            return
+        }
+        emitter.emit(TokiwatariSignpostEvent(kind: kind, message: message))
     }
 
     private static let state = Mutex(GlobalState())
@@ -217,6 +329,7 @@ public enum Tokiwatari {
     /// Internal configuration hooks used by tests.
     static func configure(
         session: any TokiwatariSessionProviding,
+        outputs: TokiwatariOutputs = [.storage],
         allowedQueryParameters: [String] = [],
         retentionSessions: Int = defaultRetentionSessions,
         maximumMainDatabaseSizeBytes: Int = 128 * 1024 * 1024,
@@ -225,50 +338,70 @@ public enum Tokiwatari {
         additionalSensitiveBodyKeys: [String] = [],
         maximumPayloadBytesForTesting: Int? = nil,
         assertingValidity: Bool = true,
+        environmentForTesting: [String: String]? = nil,
+        signpostEmitterForTesting: (any TokiwatariSignpostEmitting)? = nil,
         databaseURL: URL?
     ) {
         state.withLock { s in
             s.session = nil
             s.database = nil
+            s.outputs = []
+            s.signpostEmitter = nil
             s.lastSessionId = nil
             s.lastSequence = 0
         }
 
-        let queryParameters = sanitizedAllowedQueryParameters(
-            allowedQueryParameters,
-            assertingValidity: assertingValidity
+        let effective = effectiveOutputs(
+            configured: outputs,
+            environment: environmentForTesting ?? ProcessInfo.processInfo.environment
         )
 
+        var queryParameters: Set<String> = []
         var headerNames: Set<String> = []
         var bodyKeys: Set<String> = []
         var database: TokiwatariDatabase?
         var failure: (any Error)?
-        do {
-            headerNames = try validatedSensitiveEntries(additionalSensitiveHeaderNames, kind: .headerName) {
-                $0.lowercased()
-            }
-            bodyKeys = try validatedSensitiveEntries(additionalSensitiveBodyKeys, kind: .bodyKey) {
-                normalizedBodyKey($0)
-            }
-            if databaseURL == nil {
-                try TokiwatariDatabase.removeLegacyDatabase()
-            }
-            TokiwatariDatabase.cleanUpExpiredExports()
-            let url = try databaseURL ?? TokiwatariDatabase.defaultDatabaseURL()
-            let db = try TokiwatariDatabase(
-                url: url,
-                maximumMainDatabaseSizeBytes: maximumMainDatabaseSizeBytes,
-                maximumRetainedWALSizeBytes: maximumRetainedWALSizeBytes
+        if effective.contains(.storage) {
+            queryParameters = sanitizedAllowedQueryParameters(
+                allowedQueryParameters,
+                assertingValidity: assertingValidity
             )
-            try db.purge(keepingSessions: max(1, retentionSessions))
-            database = db
-        } catch {
-            failure = error
-            database = nil
+            do {
+                headerNames = try validatedSensitiveEntries(additionalSensitiveHeaderNames, kind: .headerName) {
+                    $0.lowercased()
+                }
+                bodyKeys = try validatedSensitiveEntries(additionalSensitiveBodyKeys, kind: .bodyKey) {
+                    normalizedBodyKey($0)
+                }
+                if databaseURL == nil {
+                    try TokiwatariDatabase.removeLegacyDatabase()
+                }
+                TokiwatariDatabase.cleanUpExpiredExports()
+                let url = try databaseURL ?? TokiwatariDatabase.defaultDatabaseURL()
+                let db = try TokiwatariDatabase(
+                    url: url,
+                    maximumMainDatabaseSizeBytes: maximumMainDatabaseSizeBytes,
+                    maximumRetainedWALSizeBytes: maximumRetainedWALSizeBytes
+                )
+                try db.purge(keepingSessions: max(1, retentionSessions))
+                database = db
+            } catch {
+                failure = error
+                database = nil
+            }
         }
+
+        // A storage failure deactivates every output — no signposts-only degradation.
+        let active: TokiwatariOutputs = effective.contains(.storage) && database == nil ? [] : effective
+
         state.withLock { s in
-            s.session = database == nil ? nil : session
+            s.session = active.isEmpty ? nil : session
             s.database = database
+            s.outputs = active
+            s.signpostEmitter = active.contains(.signposts)
+                ? (signpostEmitterForTesting ?? defaultSignpostEmitter)
+                : nil
+            s.assertsSessionValidity = assertingValidity
             s.sensitiveHeaderNames = defaultSensitiveHeaderNames.union(headerNames)
             s.sensitiveBodyKeys = defaultSensitiveBodyKeys.union(bodyKeys)
             s.allowedQueryParameters = queryParameters
@@ -286,6 +419,17 @@ public enum Tokiwatari {
         if database != nil {
             startStorageMaintenanceIfNeeded()
         }
+    }
+
+    static let signpostsEnvironmentVariable = "TOKIWATARI_SIGNPOSTS"
+
+    static func effectiveOutputs(
+        configured: TokiwatariOutputs,
+        environment: [String: String]
+    ) -> TokiwatariOutputs {
+        let known = configured.intersection(.supported)
+        guard environment[signpostsEnvironmentVariable] == "1" else { return known }
+        return known.union(.signposts)
     }
 
     /// Invalid allowlist entries are dropped, which only increases redaction.
@@ -404,10 +548,6 @@ public enum Tokiwatari {
         guard let database else { return }
         database.checkpointTruncate()
         TokiwatariDatabase.cleanUpExpiredExports()
-    }
-
-    static var isConfigured: Bool {
-        state.withLock { $0.database != nil }
     }
 
     static var databaseForTesting: TokiwatariDatabase? {

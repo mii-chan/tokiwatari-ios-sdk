@@ -71,4 +71,39 @@ import Testing
             #expect(!FileManager.default.fileExists(atPath: expired.path))
         }
     }
+
+    @Test func signpostsOnlyDefersMaintenanceUntilStorageSucceeds() {
+        tokiwatariGlobalStateLock.withLock { _ in
+            Tokiwatari.storageMaintenanceStarted.withLock { $0 = false }
+            Tokiwatari.configure(
+                session: CountingSession(),
+                outputs: [.signposts],
+                signpostEmitterForTesting: FakeSignpostEmitter(),
+                databaseURL: makeTemporaryDatabaseURL()
+            )
+            #expect(Tokiwatari.storageMaintenanceStarted.withLock { !$0 })
+
+            Tokiwatari.configure(session: CountingSession(), databaseURL: makeTemporaryDatabaseURL())
+            #expect(Tokiwatari.storageMaintenanceStarted.withLock { $0 })
+        }
+    }
+
+    @Test func maintenanceTicksAfterDowngradeToSignpostsOnlyLeaveFilesAlone() throws {
+        try tokiwatariGlobalStateLock.withLock { _ in
+            Tokiwatari.configure(session: CountingSession(), databaseURL: makeTemporaryDatabaseURL())
+            Tokiwatari.configure(
+                session: CountingSession(),
+                outputs: [.signposts],
+                signpostEmitterForTesting: FakeSignpostEmitter(),
+                databaseURL: makeTemporaryDatabaseURL()
+            )
+
+            let expired = try makeExpiredExportFile()
+            defer { try? FileManager.default.removeItem(at: expired) }
+
+            Tokiwatari.performDatabaseMaintenance()
+            Tokiwatari.performBackgroundCheckpoint()
+            #expect(FileManager.default.fileExists(atPath: expired.path))
+        }
+    }
 }

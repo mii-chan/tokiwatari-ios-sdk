@@ -5,6 +5,7 @@ import Foundation
 /// never stored raw.
 enum SanitizationLimits {
     static let identifierByteLimit = 512
+    static let sessionIdByteLimit = 128
     static let sanitizedURLByteLimit = 8 * 1024
     static let httpMethodByteLimit = 32
     static let errorDomainByteLimit = 256
