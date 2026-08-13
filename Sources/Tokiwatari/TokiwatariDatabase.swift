@@ -35,18 +35,6 @@ final class TokiwatariDatabase: Sendable {
         )
     }
 
-    /// 0.3.x and earlier stored the database directly in Application Support.
-    /// 0.4.0 deletes those files instead of migrating them (breaking change,
-    /// no data migration).
-    static func removeLegacyDatabase() throws {
-        try removeLegacyDatabase(in: supportDirectoryURL())
-    }
-
-    /// Deletes the weakly-redacted 0.3.x database or propagates failure.
-    static func removeLegacyDatabase(in supportDirectory: URL) throws {
-        try removeDatabaseFiles(at: supportDirectory.appendingPathComponent(databaseFileName))
-    }
-
     enum StorageResetError: Error {
         case fileStillExists(path: String)
     }
