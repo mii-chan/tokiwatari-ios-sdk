@@ -16,7 +16,7 @@ Tokiwatari **stays active in Release builds** — recording is build-configurati
 Add the package with Swift Package Manager and link the `Tokiwatari` library:
 
 ```swift
-.package(url: "https://github.com/mii-chan/tokiwatari-ios-sdk.git", from: "0.4.0"),
+.package(url: "https://github.com/mii-chan/tokiwatari-ios-sdk.git", from: "0.6.0"),
 ```
 
 ## Setup
