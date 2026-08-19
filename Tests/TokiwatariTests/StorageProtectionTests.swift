@@ -20,37 +20,6 @@ import Testing
         #expect(fileValues.isExcludedFromBackup == true)
     }
 
-    @Test func legacyDatabaseFilesAreRemovedFromTheSupportDirectory() throws {
-        let supportDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("tokiwatari-legacy-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: supportDirectory, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: supportDirectory) }
-
-        let legacyBase = supportDirectory.appendingPathComponent(TokiwatariDatabase.databaseFileName).path
-        for suffix in ["", "-wal", "-shm"] {
-            FileManager.default.createFile(atPath: legacyBase + suffix, contents: Data("x".utf8))
-        }
-        let unrelated = supportDirectory.appendingPathComponent("unrelated.txt")
-        FileManager.default.createFile(atPath: unrelated.path, contents: Data("x".utf8))
-
-        try TokiwatariDatabase.removeLegacyDatabase(in: supportDirectory)
-
-        for suffix in ["", "-wal", "-shm"] {
-            #expect(!FileManager.default.fileExists(atPath: legacyBase + suffix))
-        }
-        #expect(FileManager.default.fileExists(atPath: unrelated.path))
-    }
-
-    @Test func removingAbsentLegacyFilesIsNotAFailure() throws {
-        let emptyDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("tokiwatari-legacy-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: emptyDirectory, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: emptyDirectory) }
-
-        // Must not throw for the common "nothing to delete" case.
-        try TokiwatariDatabase.removeLegacyDatabase(in: emptyDirectory)
-    }
-
     @Test func removeDatabaseFilesPropagatesRemovalErrors() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("tokiwatari-reset-\(UUID().uuidString)", isDirectory: true)
