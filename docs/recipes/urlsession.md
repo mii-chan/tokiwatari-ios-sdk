@@ -36,7 +36,7 @@ extension URLSession {
 }
 ```
 
-Every call is a no-op in Release builds; the wrapper is safe to keep in production code paths.
+Recording is build-configuration agnostic: the wrapper records in Release builds too. To keep Tokiwatari out of a production artifact, exclude the dependency on the integration side (see the README).
 
 ## What gets stored, what doesn't
 
