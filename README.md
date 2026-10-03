@@ -16,7 +16,7 @@ Tokiwatari **stays active in Release builds** — recording is build-configurati
 Add the package with Swift Package Manager and link the `Tokiwatari` library:
 
 ```swift
-.package(url: "https://github.com/mii-chan/tokiwatari-ios-sdk.git", from: "1.0.0"),
+.package(url: "https://github.com/mii-chan/tokiwatari-ios-sdk.git", from: "2.0.0"),
 ```
 
 ## Setup
@@ -118,33 +118,24 @@ Everything stored is bounded: identifiers 512B, URLs 8KB, header values 4KB (100
 
 ## Recording UI events
 
-Convert your analytics event types to `TokiwatariEvent` and log them from your analytics wrapper, next to the real analytics call:
+Give your analytics event types a `String` identifier and pass it to `Tokiwatari.log(identifier:parameters:)` from your analytics wrapper, next to the real analytics call:
 
 ```swift
 import Tokiwatari
 
-struct TeaTappedEvent {
+struct TapTeaAnalyticsEvent {
     let teaId: Int
-    var tokiwatariEvent: TokiwatariEvent {
-        TokiwatariEvent(identifier: "tea_tapped_\(teaId)", parameters: ["tea_id": teaId])
-    }
+    var parameters: [String: Any] { ["tea_id": teaId] }
+    var tokiwatariIdentifier: String { "tap_tea_\(teaId)" }
 }
 
-func track(_ event: TeaTappedEvent) {
+func logTapTea(_ event: TapTeaAnalyticsEvent) {
     // ... your real analytics send goes here ...
-    Tokiwatari.log(event.tokiwatariEvent)
+    Tokiwatari.log(identifier: event.tokiwatariIdentifier, parameters: event.parameters)
 }
 ```
 
-For one-off events there is a shorthand overload:
-
-```swift
-Tokiwatari.log(identifier: "tea_tapped_42", parameters: ["tea_id": 42])
-```
-
-Parameters get the same recursive key redaction as API bodies. `identifier` is the search key (`tokiwatari ui --like 'tea_tapped_%'`); it is also a good fit for the view's `accessibilityIdentifier`.
-
-Modules that only define events can depend on the dependency-free `TokiwatariTracking` product alone (`import TokiwatariTracking`) instead of the full SDK.
+Parameters get the same recursive key redaction as API bodies. `identifier` is the search key (`tokiwatari ui --like 'tap_tea_%'`); it is also a good fit for the view's `accessibilityIdentifier`.
 
 ## Instruments signposts
 

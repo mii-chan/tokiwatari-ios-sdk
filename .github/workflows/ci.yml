@@ -44,4 +44,4 @@ jobs:
             xcrun simctl list devices available
             exit 1
           fi
-          xcodebuild test -scheme Tokiwatari-Package -destination "id=$UDID"
+          xcodebuild test -scheme Tokiwatari -destination "id=$UDID"
