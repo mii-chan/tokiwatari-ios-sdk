@@ -87,13 +87,13 @@ public enum Tokiwatari {
     ///
     /// Parameters go through the same recursive key redaction as API bodies.
     /// `identifier` is NOT subject to redaction — never put secrets in it.
-    public static func log(_ event: TokiwatariEvent) {
+    public static func log(identifier: String, parameters: [String: Any] = [:]) {
         let signposterCanEmit = currentSignpostEmitter()?.isEnabled ?? false
         guard let snapshot = nextEventDispatchSnapshot(signposterCanEmit: signposterCanEmit) else {
             return
         }
         let identifier = StringSanitizer.sanitized(
-            event.identifier,
+            identifier,
             maximumBytes: SanitizationLimits.identifierByteLimit
         )
         if let emitter = snapshot.signpostEmitter {
@@ -111,7 +111,7 @@ public enum Tokiwatari {
               let database = snapshot.database,
               let context = snapshot.sanitizationContext
         else { return }
-        let payloadJson = sanitizedUIPayloadJSON(event.parameters, sanitizer: context.sanitizer)
+        let payloadJson = sanitizedUIPayloadJSON(parameters, sanitizer: context.sanitizer)
         let record = EventRecord(
             sessionId: snapshot.sessionId,
             sessionSequence: snapshot.sessionSequence,
@@ -125,11 +125,6 @@ public enum Tokiwatari {
             payloadJson: payloadJson
         )
         database.insertAsync(record)
-    }
-
-    /// Convenience overload of `log(_:)` for one-off events.
-    public static func log(identifier: String, parameters: [String: Any] = [:]) {
-        log(TokiwatariEvent(identifier: identifier, parameters: parameters))
     }
 
     /// Records one API call on the debug timeline (`event_kind = 'api'`).
